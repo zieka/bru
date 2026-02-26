@@ -7,9 +7,13 @@ pub const InstalledFormula = struct {
     name: []const u8,
     versions: []const []const u8,
 
-    /// Return the latest (last) version string from the sorted versions array.
+    /// Return the latest version string (lexicographically highest).
     pub fn latestVersion(self: InstalledFormula) []const u8 {
-        return self.versions[self.versions.len - 1];
+        var latest = self.versions[0];
+        for (self.versions[1..]) |v| {
+            if (mem.order(u8, v, latest) == .gt) latest = v;
+        }
+        return latest;
     }
 };
 
@@ -33,8 +37,9 @@ pub const Cellar = struct {
         return true;
     }
 
-    /// Return a sorted list of installed version strings for a formula,
-    /// or null if the formula is not installed / has no versions.
+    /// Return installed version strings for a formula in filesystem order
+    /// (matching `brew list --versions` behavior).
+    /// Returns null if the formula is not installed / has no versions.
     /// Caller owns the returned slice and all strings within it.
     pub fn installedVersions(self: Cellar, allocator: Allocator, name: []const u8) ?[]const []const u8 {
         var buf: [1024]u8 = undefined;
@@ -47,8 +52,7 @@ pub const Cellar = struct {
 
         var iter = dir.iterate();
         while (iter.next() catch null) |entry| {
-            if (entry.kind != .directory) continue;
-            // Skip hidden / dot entries.
+            if (entry.kind != .directory and entry.kind != .unknown) continue;
             if (entry.name.len > 0 and entry.name[0] == '.') continue;
             const duped = allocator.dupe(u8, entry.name) catch return null;
             versions.append(allocator, duped) catch {
@@ -62,7 +66,6 @@ pub const Cellar = struct {
             return null;
         }
 
-        mem.sort([]const u8, versions.items, {}, stringLessThan);
         return versions.toOwnedSlice(allocator) catch null;
     }
 
@@ -76,7 +79,8 @@ pub const Cellar = struct {
 
         var iter = dir.iterate();
         while (iter.next() catch null) |entry| {
-            if (entry.kind != .directory) continue;
+            // Accept directories and unknown types (some filesystems don't report d_type).
+            if (entry.kind != .directory and entry.kind != .unknown) continue;
             if (entry.name.len > 0 and entry.name[0] == '.') continue;
 
             const name = allocator.dupe(u8, entry.name) catch continue;
