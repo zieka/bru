@@ -1,0 +1,129 @@
+const std = @import("std");
+
+pub const HttpClient = struct {
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) HttpClient {
+        return .{ .allocator = allocator };
+    }
+
+    /// Download a URL to a file path.
+    pub fn fetch(self: HttpClient, url: []const u8, dest_path: []const u8) !void {
+        try self.fetchInner(url, dest_path, .{}, &.{});
+    }
+
+    /// Download from GHCR with anonymous auth header (Authorization: Bearer QQ==).
+    pub fn fetchGhcr(self: HttpClient, url: []const u8, dest_path: []const u8) !void {
+        try self.fetchInner(url, dest_path, .{
+            .authorization = .{ .override = "Bearer QQ==" },
+        }, &.{});
+    }
+
+    fn fetchInner(
+        self: HttpClient,
+        url: []const u8,
+        dest_path: []const u8,
+        headers: std.http.Client.Request.Headers,
+        extra_headers: []const std.http.Header,
+    ) !void {
+        // Create parent directories for dest_path if needed.
+        if (std.fs.path.dirname(dest_path)) |parent| {
+            if (parent.len > 0) {
+                std.fs.cwd().makePath(parent) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+            }
+        }
+
+        // Open destination file for writing.
+        const file = try std.fs.cwd().createFile(dest_path, .{});
+        defer file.close();
+
+        // Set up HTTP client.
+        var client: std.http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        // Create a file-backed writer for the response body.
+        var write_buf: [8192]u8 = undefined;
+        var file_writer = file.writer(&write_buf);
+
+        // Use the high-level fetch API which handles redirects automatically.
+        const result = try client.fetch(.{
+            .location = .{ .url = url },
+            .headers = headers,
+            .extra_headers = extra_headers,
+            .response_writer = &file_writer.interface,
+        });
+
+        // Flush any remaining buffered data.
+        try file_writer.interface.flush();
+
+        // Check for non-success status.
+        if (result.status.class() != .success) {
+            return error.HttpError;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "HttpClient fetch downloads a file" {
+    // Skip network tests in CI or when explicitly requested.
+    if (std.posix.getenv("BRU_SKIP_NET_TESTS") != null) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dest_path = try std.fs.path.join(allocator, &.{
+        ".zig-cache/tmp",
+        &tmp.sub_path,
+        "response.json",
+    });
+    defer allocator.free(dest_path);
+
+    const client = HttpClient.init(allocator);
+    try client.fetch(
+        "https://httpbin.org/get",
+        dest_path,
+    );
+
+    const file = try std.fs.cwd().openFile(dest_path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    try std.testing.expect(stat.size > 100);
+}
+
+test "HttpClient fetchGhcr with auth header" {
+    // Skip network tests in CI or when explicitly requested.
+    if (std.posix.getenv("BRU_SKIP_NET_TESTS") != null) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dest_path = try std.fs.path.join(allocator, &.{
+        ".zig-cache/tmp",
+        &tmp.sub_path,
+        "config.json",
+    });
+    defer allocator.free(dest_path);
+
+    const client = HttpClient.init(allocator);
+    try client.fetchGhcr(
+        "https://ghcr.io/v2/homebrew/core/jq/blobs/sha256:4b3576df4065747bf8c3b95c0a3eebc5f003a30819a645d9cc459bb06259c8ae",
+        dest_path,
+    );
+
+    const file = try std.fs.cwd().openFile(dest_path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    try std.testing.expect(stat.size > 0);
+}

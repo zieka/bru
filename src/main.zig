@@ -1,0 +1,83 @@
+const std = @import("std");
+const Config = @import("config.zig").Config;
+const dispatch = @import("dispatch.zig");
+const fallback = @import("fallback.zig");
+
+pub fn main() !void {
+    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_instance.deinit();
+    const allocator = gpa_instance.allocator();
+
+    var cfg = try Config.load(allocator);
+    defer cfg.deinit();
+
+    // Collect process arguments.
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    const parsed = dispatch.parseArgs(argv);
+
+    // Propagate flag overrides into config.
+    if (parsed.verbose) cfg.verbose = true;
+    if (parsed.debug) cfg.debug = true;
+    if (parsed.quiet) cfg.quiet = true;
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    // --version: print version and exit.
+    if (parsed.version) {
+        try stdout.print("bru 0.1.0\n", .{});
+        try stdout.flush();
+        return;
+    }
+
+    // No command provided: print version and usage hint.
+    const command_name = parsed.command orelse {
+        try stdout.print("bru 0.1.0\n", .{});
+        try stdout.print("Run 'bru --help' for usage information.\n", .{});
+        try stdout.flush();
+        return;
+    };
+
+    // Look up in the native dispatch table.
+    if (dispatch.getCommand(command_name)) |handler| {
+        try handler(allocator, parsed.command_args, cfg);
+        return;
+    }
+
+    // No native handler — fall back to the real brew binary.
+    fallback.execBrew(allocator, argv);
+}
+
+test {
+    _ = @import("cellar.zig");
+    _ = @import("cmd/list.zig");
+    _ = @import("cmd/info.zig");
+    _ = @import("cmd/deps.zig");
+    _ = @import("cmd/leaves.zig");
+    _ = @import("cmd/outdated.zig");
+    _ = @import("cmd/config_cmd.zig");
+    _ = @import("cmd/fetch_cmd.zig");
+    _ = @import("cmd/install.zig");
+    _ = @import("cmd/uninstall.zig");
+    _ = @import("cmd/link.zig");
+    _ = @import("cmd/upgrade.zig");
+    _ = @import("cmd/cleanup.zig");
+    _ = @import("cmd/autoremove.zig");
+    _ = @import("cmd/update.zig");
+    _ = @import("cmd/prefix.zig");
+    _ = @import("config.zig");
+    _ = @import("dispatch.zig");
+    _ = @import("fallback.zig");
+    _ = @import("output.zig");
+    _ = @import("tab.zig");
+    _ = @import("formula.zig");
+    _ = @import("index.zig");
+    _ = @import("version.zig");
+    _ = @import("http.zig");
+    _ = @import("download.zig");
+    _ = @import("bottle.zig");
+    _ = @import("linker.zig");
+}
