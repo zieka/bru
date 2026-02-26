@@ -4,12 +4,20 @@ const Config = @import("../config.zig").Config;
 const Cellar = @import("../cellar.zig").Cellar;
 const Index = @import("../index.zig").Index;
 const Tab = @import("../tab.zig").Tab;
+const writeJsonStr = @import("../json_helpers.zig").writeJsonStr;
 
 /// Show installed formulae that are not dependencies of any other installed formula.
 ///
 /// For each installed formula, if it is NOT in the set of dependencies of any
 /// other installed formula and was installed on request, its name is printed.
-pub fn leavesCmd(allocator: Allocator, _: []const []const u8, config: Config) anyerror!void {
+pub fn leavesCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
+    var json_output = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_output = true;
+        }
+    }
+
     // Load the formula index from disk or build from the JWS cache.
     var index = try Index.loadOrBuild(allocator, config.cache);
     // Note: do not call index.deinit() -- the index may be mmap'd (from disk)
@@ -48,6 +56,34 @@ pub fn leavesCmd(allocator: Allocator, _: []const []const u8, config: Config) an
     var w = std.fs.File.stdout().writer(&buf);
     const stdout = &w.interface;
 
+    if (json_output) {
+        try stdout.writeAll("[");
+        var first: bool = true;
+        for (installed) |formula| {
+            if (dep_set.contains(formula.name)) continue;
+
+            var path_buf: [1024]u8 = undefined;
+            const keg_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}", .{
+                config.cellar,
+                formula.name,
+                formula.latestVersion(),
+            }) catch continue;
+
+            const tab = Tab.loadFromKeg(allocator, keg_path) orelse continue;
+            defer tab.deinit(allocator);
+
+            if (tab.installed_on_request) {
+                const display_name = getDisplayName(&index, formula.name);
+                if (!first) try stdout.writeAll(",");
+                try writeJsonStr(stdout, display_name);
+                first = false;
+            }
+        }
+        try stdout.writeAll("]\n");
+        try stdout.flush();
+        return;
+    }
+
     for (installed) |formula| {
         if (dep_set.contains(formula.name)) continue;
 
@@ -63,11 +99,22 @@ pub fn leavesCmd(allocator: Allocator, _: []const []const u8, config: Config) an
         defer tab.deinit(allocator);
 
         if (tab.installed_on_request) {
-            try stdout.print("{s}\n", .{formula.name});
+            const display_name = getDisplayName(&index, formula.name);
+            try stdout.print("{s}\n", .{display_name});
         }
     }
 
     try stdout.flush();
+}
+
+/// Resolve display name: use full_name from index if it's a non-core tap, otherwise short name.
+fn getDisplayName(index: *const Index, name: []const u8) []const u8 {
+    const entry = index.lookup(name) orelse return name;
+    const full = index.getString(entry.full_name_offset);
+    if (full.len > 0 and !std.mem.startsWith(u8, full, "homebrew/core/")) {
+        return full;
+    }
+    return name;
 }
 
 // ---------------------------------------------------------------------------

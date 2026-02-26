@@ -61,11 +61,9 @@ pub const Linker = struct {
             // Strategy depends on directory type.
             if (mem.eql(u8, dir, "bin") or mem.eql(u8, dir, "sbin")) {
                 self.linkFlat(keg_dir, keg_dir_path, prefix_dir_path) catch continue;
-            } else if (mem.eql(u8, dir, "etc")) {
-                self.linkFilesOnly(keg_dir, keg_dir_path, prefix_dir_path) catch continue;
             } else {
-                // lib, include, share, var: deep linking
-                self.linkDeep(keg_dir, keg_dir_path, prefix_dir_path) catch continue;
+                // etc, lib, include, share, var: recursive file linking
+                self.linkRecursive(keg_dir, keg_dir_path, prefix_dir_path) catch continue;
             }
         }
     }
@@ -120,13 +118,12 @@ pub const Linker = struct {
         }
     }
 
-    /// Files-only linking: create real directories, symlink only files.
-    /// Recurses into subdirectories.
-    fn linkFilesOnly(self: Linker, keg_dir: fs.Dir, keg_dir_path: []const u8, prefix_dir_path: []const u8) !void {
+    /// Recursive linking: create real directories in prefix, symlink files.
+    /// Used for etc/, lib/, include/, share/, var/.
+    fn linkRecursive(self: Linker, keg_dir: fs.Dir, keg_dir_path: []const u8, prefix_dir_path: []const u8) !void {
         var iter = keg_dir.iterate();
         while (iter.next() catch null) |entry| {
             if (entry.kind == .directory) {
-                // Create real directory in prefix and recurse.
                 var sub_keg_buf: [fs.max_path_bytes]u8 = undefined;
                 const sub_keg = std.fmt.bufPrint(&sub_keg_buf, "{s}/{s}", .{ keg_dir_path, entry.name }) catch continue;
 
@@ -141,47 +138,8 @@ pub const Linker = struct {
                 var sub_dir = keg_dir.openDir(entry.name, .{ .iterate = true }) catch continue;
                 defer sub_dir.close();
 
-                self.linkFilesOnly(sub_dir, sub_keg, sub_prefix) catch continue;
+                self.linkRecursive(sub_dir, sub_keg, sub_prefix) catch continue;
             } else {
-                // Symlink file.
-                var src_buf: [fs.max_path_bytes]u8 = undefined;
-                const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ keg_dir_path, entry.name }) catch continue;
-
-                var dst_buf: [fs.max_path_bytes]u8 = undefined;
-                const dst = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ prefix_dir_path, entry.name }) catch continue;
-
-                fs.deleteFileAbsolute(dst) catch |err| switch (err) {
-                    error.FileNotFound => {},
-                    else => continue,
-                };
-                fs.symLinkAbsolute(src, dst, .{}) catch continue;
-            }
-        }
-    }
-
-    /// Deep linking: recurse into subdirs, create real dirs, symlink files.
-    fn linkDeep(self: Linker, keg_dir: fs.Dir, keg_dir_path: []const u8, prefix_dir_path: []const u8) !void {
-        var iter = keg_dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind == .directory) {
-                // Create real directory in prefix and recurse.
-                var sub_keg_buf: [fs.max_path_bytes]u8 = undefined;
-                const sub_keg = std.fmt.bufPrint(&sub_keg_buf, "{s}/{s}", .{ keg_dir_path, entry.name }) catch continue;
-
-                var sub_prefix_buf: [fs.max_path_bytes]u8 = undefined;
-                const sub_prefix = std.fmt.bufPrint(&sub_prefix_buf, "{s}/{s}", .{ prefix_dir_path, entry.name }) catch continue;
-
-                fs.makeDirAbsolute(sub_prefix) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => continue,
-                };
-
-                var sub_dir = keg_dir.openDir(entry.name, .{ .iterate = true }) catch continue;
-                defer sub_dir.close();
-
-                self.linkDeep(sub_dir, sub_keg, sub_prefix) catch continue;
-            } else {
-                // Symlink file.
                 var src_buf: [fs.max_path_bytes]u8 = undefined;
                 const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ keg_dir_path, entry.name }) catch continue;
 

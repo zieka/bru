@@ -85,6 +85,7 @@ compare_exact "outdated" outdated
 compare "search bat" search bat
 compare_exact "deps bat" deps bat
 compare_loose "info bat" info bat
+compare "uses libgit2 --installed" uses libgit2 --installed
 
 echo ""
 echo "=== Tier 2 smoke tests ==="
@@ -135,6 +136,26 @@ if [ -n "$TEST_FORMULA" ]; then
     fi
 else
     echo "SKIP (no installed formulae)"
+    SKIP=$((SKIP + 1))
+fi
+
+# install/uninstall round-trip (uses a small formula)
+echo -n "install/uninstall round-trip: "
+TEST_INSTALL="tree"  # small, no deps, fast to install
+# Only run if not already installed
+if ! brew list "$TEST_INSTALL" &>/dev/null; then
+    if $BRU install "$TEST_INSTALL" 2>/dev/null && \
+       $BRU list 2>/dev/null | grep -q "$TEST_INSTALL" && \
+       $BRU uninstall "$TEST_INSTALL" 2>/dev/null && \
+       ! $BRU list 2>/dev/null | grep -q "$TEST_INSTALL"; then
+        echo "PASS"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "SKIP ($TEST_INSTALL already installed)"
     SKIP=$((SKIP + 1))
 fi
 

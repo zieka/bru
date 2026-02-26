@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Config = @import("../config.zig").Config;
 const HttpClient = @import("../http.zig").HttpClient;
 const Index = @import("../index.zig").Index;
+const CaskIndex = @import("../cask_index.zig").CaskIndex;
 const Output = @import("../output.zig").Output;
 
 /// Fetch fresh API data and rebuild the binary index.
@@ -56,6 +57,32 @@ pub fn updateCmd(allocator: Allocator, args: []const []const u8, config: Config)
 
     // Rebuild the index from the fresh JWS data.
     _ = try Index.loadOrBuild(allocator, config.cache);
+
+    // Also download cask data
+    out.print("Downloading cask data...\n", .{});
+
+    var cask_jws_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cask_jws_path = std.fmt.bufPrint(&cask_jws_buf, "{s}/api/cask.jws.json", .{config.cache}) catch
+        return error.PathTooLong;
+
+    var cask_idx_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cask_idx_path = std.fmt.bufPrint(&cask_idx_buf, "{s}/api/cask.bru.idx", .{config.cache}) catch
+        return error.PathTooLong;
+
+    client.fetch("https://formulae.brew.sh/api/cask.jws.json", cask_jws_path) catch |err| {
+        out.warn("Failed to download cask data: {s}", .{@errorName(err)});
+    };
+
+    // Delete old cask index to force rebuild
+    std.fs.deleteFileAbsolute(cask_idx_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            out.warn("Failed to remove old cask index: {s}", .{@errorName(err)});
+        },
+    };
+
+    // Rebuild cask index (best effort)
+    _ = CaskIndex.loadOrBuild(allocator, config.cache) catch {};
 
     out.section("Updated successfully");
 }

@@ -93,7 +93,9 @@ pub const Tab = struct {
         const writer = json_buf.writer(allocator);
 
         try writer.writeAll("{\n");
-        try writer.print("  \"homebrew_version\": \"{s}\",\n", .{self.homebrew_version});
+        try writer.writeAll("  \"homebrew_version\": \"");
+        try writeJsonEscaped(writer, self.homebrew_version);
+        try writer.writeAll("\",\n");
         try writer.writeAll("  \"used_options\": [],\n");
         try writer.writeAll("  \"unused_options\": [],\n");
         try writer.writeAll("  \"built_as_bottle\": true,\n");
@@ -109,18 +111,21 @@ pub const Tab = struct {
             try writer.writeAll("  \"time\": null,\n");
         }
 
-        try writer.print("  \"compiler\": \"{s}\",\n", .{self.compiler});
+        try writer.writeAll("  \"compiler\": \"");
+        try writeJsonEscaped(writer, self.compiler);
+        try writer.writeAll("\",\n");
         try writer.writeAll("  \"aliases\": [],\n");
         try writer.writeAll("  \"runtime_dependencies\": [");
 
         for (self.runtime_dependencies, 0..) |dep, i| {
             if (i > 0) try writer.writeAll(",");
-            try writer.writeAll("\n    {");
-            try writer.print("\"full_name\": \"{s}\", ", .{dep.full_name});
-            try writer.print("\"version\": \"{s}\", ", .{dep.version});
-            try writer.print("\"revision\": {d}, ", .{dep.revision});
-            try writer.print("\"pkg_version\": \"{s}\", ", .{dep.pkg_version});
-            try writer.print("\"declared_directly\": {s}", .{if (dep.declared_directly) "true" else "false"});
+            try writer.writeAll("\n    {\"full_name\": \"");
+            try writeJsonEscaped(writer, dep.full_name);
+            try writer.writeAll("\", \"version\": \"");
+            try writeJsonEscaped(writer, dep.version);
+            try writer.print("\", \"revision\": {d}, \"pkg_version\": \"", .{dep.revision});
+            try writeJsonEscaped(writer, dep.pkg_version);
+            try writer.print("\", \"declared_directly\": {s}", .{if (dep.declared_directly) "true" else "false"});
             try writer.writeAll("}");
         }
 
@@ -139,7 +144,31 @@ pub const Tab = struct {
 };
 
 // ---------------------------------------------------------------------------
-// JSON helpers
+// JSON writing helpers
+// ---------------------------------------------------------------------------
+
+/// Write a JSON-escaped string value (without surrounding quotes) to the writer.
+fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON reading helpers
 // ---------------------------------------------------------------------------
 
 /// Get a string value from a JSON object by key.
@@ -281,4 +310,72 @@ test "Tab writeToKeg round-trips" {
     try std.testing.expect(tab2.poured_from_bottle);
     try std.testing.expect(tab2.installed_on_request);
     try std.testing.expectEqualStrings("clang", tab2.compiler);
+}
+
+test "Tab writeToKeg round-trips with runtime_dependencies" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &real_path_buf);
+
+    const deps = try allocator.alloc(RuntimeDep, 1);
+    deps[0] = .{
+        .full_name = "libgit2",
+        .version = "1.9.0",
+        .revision = 0,
+        .pkg_version = "1.9.0",
+        .declared_directly = true,
+    };
+
+    var tab = Tab{
+        .installed_on_request = true,
+        .poured_from_bottle = true,
+        .loaded_from_api = true,
+        .time = 1700000000,
+        .runtime_dependencies = deps,
+        .compiler = "clang",
+        .homebrew_version = "bru 0.1.0",
+    };
+    try tab.writeToKeg(allocator, tmp_path);
+
+    // Must free deps AFTER writing, since Tab doesn't own them in this test
+    allocator.free(deps);
+
+    const tab2 = Tab.loadFromKeg(allocator, tmp_path) orelse return error.TestUnexpectedResult;
+    defer tab2.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), tab2.runtime_dependencies.len);
+    try std.testing.expectEqualStrings("libgit2", tab2.runtime_dependencies[0].full_name);
+    try std.testing.expectEqualStrings("1.9.0", tab2.runtime_dependencies[0].version);
+    try std.testing.expectEqual(@as(u32, 0), tab2.runtime_dependencies[0].revision);
+    try std.testing.expectEqualStrings("1.9.0", tab2.runtime_dependencies[0].pkg_version);
+    try std.testing.expect(tab2.runtime_dependencies[0].declared_directly);
+}
+
+test "Tab writeToKeg escapes special characters" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &real_path_buf);
+
+    var tab = Tab{
+        .installed_on_request = true,
+        .poured_from_bottle = true,
+        .loaded_from_api = true,
+        .time = 1700000000,
+        .runtime_dependencies = &.{},
+        .compiler = "clang",
+        .homebrew_version = "bru \"test\" 0.1.0",
+    };
+    try tab.writeToKeg(allocator, tmp_path);
+
+    const tab2 = Tab.loadFromKeg(allocator, tmp_path) orelse return error.TestUnexpectedResult;
+    defer tab2.deinit(allocator);
+    try std.testing.expectEqualStrings("bru \"test\" 0.1.0", tab2.homebrew_version);
 }

@@ -5,6 +5,7 @@ const cellar_mod = @import("../cellar.zig");
 const Cellar = cellar_mod.Cellar;
 const Index = @import("../index.zig").Index;
 const PkgVersion = @import("../version.zig").PkgVersion;
+const writeJsonStr = @import("../json_helpers.zig").writeJsonStr;
 
 /// Show installed formulae that have a newer version available in the index.
 ///
@@ -12,9 +13,12 @@ const PkgVersion = @import("../version.zig").PkgVersion;
 /// Otherwise: just prints "name"
 pub fn outdatedCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
     var verbose = false;
+    var json_output = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             verbose = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json_output = true;
         }
     }
 
@@ -40,6 +44,38 @@ pub fn outdatedCmd(allocator: Allocator, args: []const []const u8, config: Confi
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     const stdout = &w.interface;
+
+    if (json_output) {
+        try stdout.writeAll("[");
+        var first: bool = true;
+        for (installed) |formula| {
+            const entry = index.lookup(formula.name) orelse continue;
+            const index_version_str = index.getString(entry.version_offset);
+            const installed_version_str = formula.latestVersion();
+            const installed_pv = PkgVersion.parse(installed_version_str);
+            const index_pv = PkgVersion{
+                .version = index_version_str,
+                .revision = @as(u32, entry.revision),
+            };
+
+            if (installed_pv.order(index_pv) == .lt) {
+                if (!first) try stdout.writeAll(",");
+                try stdout.writeAll("{\"name\":");
+                try writeJsonStr(stdout, formula.name);
+                try stdout.writeAll(",\"installed_version\":");
+                try writeJsonStr(stdout, installed_version_str);
+                var fmt_buf: [128]u8 = undefined;
+                const index_formatted = index_pv.format(&fmt_buf);
+                try stdout.writeAll(",\"latest_version\":");
+                try writeJsonStr(stdout, index_formatted);
+                try stdout.writeAll("}");
+                first = false;
+            }
+        }
+        try stdout.writeAll("]\n");
+        try stdout.flush();
+        return;
+    }
 
     for (installed) |formula| {
         // Look up this formula in the index.

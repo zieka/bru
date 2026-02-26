@@ -2,6 +2,7 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const dispatch = @import("dispatch.zig");
 const fallback = @import("fallback.zig");
+const help = @import("help.zig");
 
 pub fn main() !void {
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
@@ -26,6 +27,18 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
+    // --help: print help and exit.
+    if (parsed.help) {
+        if (parsed.command) |cmd| {
+            if (!try help.printCommandHelp(stdout, cmd)) {
+                try help.printGeneralHelp(stdout);
+            }
+        } else {
+            try help.printGeneralHelp(stdout);
+        }
+        return;
+    }
+
     // --version: print version and exit.
     if (parsed.version) {
         try stdout.print("bru 0.1.0\n", .{});
@@ -35,14 +48,21 @@ pub fn main() !void {
 
     // No command provided: print version and usage hint.
     const command_name = parsed.command orelse {
-        try stdout.print("bru 0.1.0\n", .{});
-        try stdout.print("Run 'bru --help' for usage information.\n", .{});
-        try stdout.flush();
+        try help.printGeneralHelp(stdout);
         return;
     };
 
     // Look up in the native dispatch table.
     if (dispatch.getCommand(command_name)) |handler| {
+        // Check if --help is passed as a command argument
+        for (parsed.command_args) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                if (try help.printCommandHelp(stdout, command_name)) {
+                    return;
+                }
+                break;
+            }
+        }
         try handler(allocator, parsed.command_args, cfg);
         return;
     }
@@ -67,7 +87,10 @@ test {
     _ = @import("cmd/cleanup.zig");
     _ = @import("cmd/autoremove.zig");
     _ = @import("cmd/update.zig");
+    _ = @import("cmd/uses.zig");
+    _ = @import("cmd/search.zig");
     _ = @import("cmd/prefix.zig");
+    _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");
     _ = @import("fallback.zig");
@@ -75,9 +98,13 @@ test {
     _ = @import("tab.zig");
     _ = @import("formula.zig");
     _ = @import("index.zig");
+    _ = @import("cask.zig");
+    _ = @import("cask_index.zig");
     _ = @import("version.zig");
     _ = @import("http.zig");
     _ = @import("download.zig");
     _ = @import("bottle.zig");
     _ = @import("linker.zig");
+    _ = @import("json_helpers.zig");
+    _ = @import("fuzzy.zig");
 }
