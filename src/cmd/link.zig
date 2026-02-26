@@ -13,11 +13,16 @@ const Output = @import("../output.zig").Output;
 /// Creates symlinks from the keg (latest installed version) into the
 /// prefix directories (bin, lib, include, etc.) and sets up the opt link.
 pub fn linkCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
-    // 1. Get formula name from first non-flag argument.
+    // 1. Get formula name and flags from arguments.
     var formula_name: ?[]const u8 = null;
+    var force = false;
+
     for (args) |arg| {
-        if (arg.len > 0 and arg[0] == '-') continue;
-        if (formula_name == null) {
+        if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
+            force = true;
+        } else if (arg.len > 0 and arg[0] == '-') {
+            continue;
+        } else if (formula_name == null) {
             formula_name = arg;
         }
     }
@@ -26,13 +31,29 @@ pub fn linkCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
         const stderr = &ew.interface;
-        try stderr.print("Usage: bru link <formula>\n", .{});
+        try stderr.print("Usage: bru link [--force] <formula>\n", .{});
         try stderr.flush();
         std.process.exit(1);
     };
 
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
+
+    // 1b. Check if keg-only and warn unless --force.
+    const Index = @import("../index.zig").Index;
+    var idx = Index.loadOrBuild(allocator, config.cache) catch null;
+    if (idx) |*index| {
+        if (index.lookup(name)) |entry| {
+            const keg_only = (entry.flags & 1) != 0;
+            if (keg_only and !force) {
+                err_out.err("{s} is keg-only. Use --force to link anyway.", .{name});
+                std.process.exit(1);
+            }
+            if (keg_only and force) {
+                out.warn("{s} is keg-only; force-linking into prefix.", .{name});
+            }
+        }
+    }
 
     // 2. Get installed versions via cellar.
     const cellar = Cellar.init(config.cellar);
