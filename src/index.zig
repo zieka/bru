@@ -302,6 +302,12 @@ pub const Index = struct {
     // Persistence
     // ------------------------------------------------------------------
 
+    /// Release an mmap'd index (from openFromDisk). Does not use the allocator.
+    fn munmapIndex(idx: Index) void {
+        const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(idx.data);
+        posix.munmap(aligned);
+    }
+
     /// Write the index data to a file, creating or overwriting.
     pub fn writeToDisk(self: *const Index, path: []const u8) !void {
         const file = try std.fs.createFileAbsolute(path, .{});
@@ -347,21 +353,34 @@ pub const Index = struct {
     }
 
     /// Load an existing index from disk, or build one from the JWS cache.
+    /// Rebuilds if the JWS source file is newer than the cached index.
     pub fn loadOrBuild(allocator: Allocator, cache_dir: []const u8) !Index {
         // 1. Try loading existing index from disk.
         var idx_path_buf: [1024]u8 = undefined;
         const idx_path = std.fmt.bufPrint(&idx_path_buf, "{s}/api/formula.bru.idx", .{cache_dir}) catch
             return error.PathTooLong;
 
-        if (try openFromDisk(idx_path)) |idx| {
-            return idx;
-        }
-
-        // 2. Read the JWS file.
         var jws_path_buf: [1024]u8 = undefined;
         const jws_path = std.fmt.bufPrint(&jws_path_buf, "{s}/api/formula.jws.json", .{cache_dir}) catch
             return error.PathTooLong;
 
+        if (try openFromDisk(idx_path)) |idx| {
+            // Check if the JWS source is newer than the cached index.
+            const stale = blk: {
+                const idx_file = std.fs.openFileAbsolute(idx_path, .{}) catch break :blk true;
+                defer idx_file.close();
+                const jws_file = std.fs.openFileAbsolute(jws_path, .{}) catch break :blk false;
+                defer jws_file.close();
+                const idx_stat = idx_file.stat() catch break :blk true;
+                const jws_stat = jws_file.stat() catch break :blk false;
+                break :blk jws_stat.mtime > idx_stat.mtime;
+            };
+            if (!stale) return idx;
+            // Stale: unmap and rebuild below.
+            munmapIndex(idx);
+        }
+
+        // 2. Read the JWS file.
         const jws_file = try std.fs.openFileAbsolute(jws_path, .{});
         defer jws_file.close();
 
@@ -504,6 +523,51 @@ test "lookup missing returns null" {
     try std.testing.expect(idx.lookup("nonexistent") == null);
     try std.testing.expect(idx.lookup("") == null);
     try std.testing.expect(idx.lookup("bats") == null);
+}
+
+test "loadOrBuild rebuilds stale index when JWS is newer" {
+    const allocator = std.testing.allocator;
+
+    const home = std.posix.getenv("HOME") orelse return;
+    var cache_buf: [512]u8 = undefined;
+    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/Library/Caches/Homebrew", .{home}) catch return;
+
+    var idx_buf: [1024]u8 = undefined;
+    const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/formula.bru.idx", .{cache_dir}) catch return;
+
+    // Write a minimal valid .idx file with 0 entries and backdate it.
+    {
+        const fake_header = IndexHeader{
+            .entry_count = 0,
+            .hash_table_offset = @sizeOf(IndexHeader),
+            .entries_offset = @sizeOf(IndexHeader),
+            .strings_offset = @sizeOf(IndexHeader),
+        };
+        const f = std.fs.createFileAbsolute(idx_path, .{}) catch return;
+        f.writeAll(mem.asBytes(&fake_header)) catch {
+            f.close();
+            return;
+        };
+        // Backdate the file so the JWS is newer.
+        const epoch_past: posix.timespec = .{ .sec = 1000000000, .nsec = 0 };
+        posix.futimens(f.handle, &.{ epoch_past, epoch_past }) catch {
+            f.close();
+            return;
+        };
+        f.close();
+    }
+
+    // loadOrBuild should detect the stale index and rebuild from JWS.
+    var idx = Index.loadOrBuild(allocator, cache_dir) catch return;
+    defer idx.deinit();
+
+    // A rebuilt index from the real JWS should have thousands of entries.
+    // A stale load of our fake file would have 0 entries.
+    try std.testing.expect(idx.entryCount() > 5000);
+
+    // Verify the index is functional.
+    const entry = idx.lookup("bat") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("bat", idx.getString(entry.name_offset));
 }
 
 test "loadOrBuild from real cache" {
