@@ -186,6 +186,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         .runtime_dependencies = runtime_deps.items,
         .compiler = "clang",
         .homebrew_version = "bru 0.1.0",
+        .source_tap = "homebrew/core",
     };
     try tab.writeToKeg(allocator, keg_path);
 

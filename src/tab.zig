@@ -20,6 +20,7 @@ pub const Tab = struct {
     runtime_dependencies: []const RuntimeDep,
     compiler: []const u8,
     homebrew_version: []const u8,
+    source_tap: []const u8,
 
     /// Attempt to load and parse a Tab from a keg directory.
     /// Expects {keg_path}/INSTALL_RECEIPT.json to exist.
@@ -53,10 +54,33 @@ pub const Tab = struct {
             return null;
         };
 
+        // Parse source.tap.
+        const source_tap = blk: {
+            const source_val = root.get("source") orelse break :blk allocator.dupe(u8, "") catch {
+                allocator.free(compiler);
+                allocator.free(homebrew_version);
+                return null;
+            };
+            const source_obj = switch (source_val) {
+                .object => |o| o,
+                else => break :blk allocator.dupe(u8, "") catch {
+                    allocator.free(compiler);
+                    allocator.free(homebrew_version);
+                    return null;
+                },
+            };
+            break :blk allocator.dupe(u8, jsonStr(source_obj, "tap") orelse "") catch {
+                allocator.free(compiler);
+                allocator.free(homebrew_version);
+                return null;
+            };
+        };
+
         // Parse runtime_dependencies array.
         const deps = parseRuntimeDeps(allocator, root) catch {
             allocator.free(compiler);
             allocator.free(homebrew_version);
+            allocator.free(source_tap);
             return null;
         };
 
@@ -68,6 +92,7 @@ pub const Tab = struct {
             .runtime_dependencies = deps,
             .compiler = compiler,
             .homebrew_version = homebrew_version,
+            .source_tap = source_tap,
         };
     }
 
@@ -81,6 +106,7 @@ pub const Tab = struct {
         allocator.free(self.runtime_dependencies);
         allocator.free(self.compiler);
         allocator.free(self.homebrew_version);
+        allocator.free(self.source_tap);
     }
 
     /// Write an INSTALL_RECEIPT.json file into the keg directory.
@@ -134,7 +160,11 @@ pub const Tab = struct {
         }
         try writer.writeAll("],\n");
 
-        try writer.writeAll("  \"source\": {\"spec\": \"stable\"}\n");
+        if (self.source_tap.len > 0) {
+            try writer.print("  \"source\": {{\"spec\": \"stable\", \"tap\": \"{s}\"}}\n", .{self.source_tap});
+        } else {
+            try writer.writeAll("  \"source\": {\"spec\": \"stable\"}\n");
+        }
         try writer.writeAll("}\n");
 
         const file = try std.fs.createFileAbsolute(receipt_path, .{});
@@ -301,6 +331,7 @@ test "Tab writeToKeg round-trips" {
         .runtime_dependencies = &.{},
         .compiler = "clang",
         .homebrew_version = "bru 0.1.0",
+        .source_tap = "",
     };
     try tab.writeToKeg(allocator, tmp_path);
 
@@ -338,6 +369,7 @@ test "Tab writeToKeg round-trips with runtime_dependencies" {
         .runtime_dependencies = deps,
         .compiler = "clang",
         .homebrew_version = "bru 0.1.0",
+        .source_tap = "",
     };
     try tab.writeToKeg(allocator, tmp_path);
 
@@ -372,6 +404,7 @@ test "Tab writeToKeg escapes special characters" {
         .runtime_dependencies = &.{},
         .compiler = "clang",
         .homebrew_version = "bru \"test\" 0.1.0",
+        .source_tap = "",
     };
     try tab.writeToKeg(allocator, tmp_path);
 
