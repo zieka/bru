@@ -40,6 +40,15 @@ pub fn depsCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         }
     }
 
+    if (tree_mode and json_output) {
+        var warn_buf: [4096]u8 = undefined;
+        var ww = std.fs.File.stderr().writer(&warn_buf);
+        const warn_w = &ww.interface;
+        try warn_w.print("Warning: --tree is ignored when --json is specified\n", .{});
+        try warn_w.flush();
+        tree_mode = false;
+    }
+
     if (formula_name == null) {
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
