@@ -70,31 +70,44 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "search",
-            \\Usage: bru search <query>
+            \\Usage: bru search [--json] <query>
             \\
-            \\Search for formulae matching the query substring.
+            \\Search for formulae and casks matching the query substring.
+            \\
+            \\Options:
+            \\  --json  Output as JSON ({"formulae":[...],"casks":[...]})
+            \\
             \\Alias: -S
             \\
         },
         .{ "info",
-            \\Usage: bru info <formula>
+            \\Usage: bru info [--json] <formula>
             \\
             \\Show detailed information about a formula.
             \\
+            \\Options:
+            \\  --json  Output as JSON
+            \\
         },
         .{ "list",
-            \\Usage: bru list [--versions] [--pinned]
+            \\Usage: bru list [--cask] [--json] [--versions] [--pinned]
             \\
-            \\List installed formulae.
+            \\List installed formulae and casks.
+            \\
+            \\Options:
+            \\  --cask, --casks  Only list casks
+            \\  --json           Output as JSON
+            \\
             \\Alias: ls
             \\
         },
         .{ "deps",
-            \\Usage: bru deps [--tree] [--1] [--include-build] <formula>
+            \\Usage: bru deps [--json] [--tree] [--1] [--include-build] <formula>
             \\
             \\Show dependencies for a formula.
             \\
             \\Options:
+            \\  --json           Output as JSON
             \\  --tree           Show as indented tree
             \\  --1, --direct    Show only direct dependencies
             \\  --include-build  Include build-time dependencies
@@ -111,9 +124,12 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "leaves",
-            \\Usage: bru leaves
+            \\Usage: bru leaves [--json]
             \\
             \\Show installed formulae that are not dependencies of other formulae.
+            \\
+            \\Options:
+            \\  --json  Output as JSON
             \\
         },
         .{ "link",
@@ -146,9 +162,12 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "outdated",
-            \\Usage: bru outdated
+            \\Usage: bru outdated [--json]
             \\
             \\Show formulae with available upgrades.
+            \\
+            \\Options:
+            \\  --json  Output as JSON
             \\
         },
         .{ "cleanup",
@@ -202,4 +221,17 @@ test "getCommandHelp returns help for known commands" {
 
 test "getCommandHelp returns null for unknown commands" {
     try std.testing.expect(getCommandHelp("nonexistent") == null);
+}
+
+test "help text documents --json flag for supported commands" {
+    const json_commands = .{ "search", "info", "list", "deps", "leaves", "outdated" };
+    inline for (json_commands) |cmd| {
+        const help = getCommandHelp(cmd) orelse unreachable;
+        try std.testing.expect(std.mem.indexOf(u8, help, "--json") != null);
+    }
+}
+
+test "list help text documents --cask flag" {
+    const help = getCommandHelp("list") orelse unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, help, "--cask") != null);
 }
