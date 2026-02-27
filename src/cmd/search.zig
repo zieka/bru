@@ -3,15 +3,15 @@ const Allocator = std.mem.Allocator;
 const Config = @import("../config.zig").Config;
 const Index = @import("../index.zig").Index;
 const CaskIndex = @import("../cask_index.zig").CaskIndex;
+const fuzzy = @import("../fuzzy.zig");
 const writeJsonStr = @import("../json_helpers.zig").writeJsonStr;
 
-/// Search for formulae whose names contain the given substring.
+/// Search for formulae and casks matching the query.
 ///
 /// Usage: bru search <query>
 ///
-/// Iterates all entries in the binary index and prints each formula name
-/// that contains the query as a substring.  Exits with code 1 if no args
-/// are supplied or if no matches are found.
+/// Matches by substring first, then by edit distance (fuzzy) for short queries.
+/// This matches `brew search` behavior which includes close fuzzy matches.
 pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
     var json_output = false;
     var query: ?[]const u8 = null;
@@ -36,73 +36,110 @@ pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config)
     const search_query = query.?;
 
     var idx = try Index.loadOrBuild(allocator, config.cache);
-    // Note: do not call idx.deinit() -- the index may be mmap'd (from disk)
-    // in which case the allocator field is undefined. The process exits after
-    // this command so OS reclamation is sufficient.
 
     const count = idx.entryCount();
 
+    // Collect matching formula names (substring + fuzzy).
+    var formula_matches = std.ArrayList([]const u8){};
+    defer formula_matches.deinit(allocator);
+
+    // Track substring matches in a set to avoid duplicates with fuzzy.
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    // Substring matches.
+    for (0..count) |i| {
+        const entry = idx.getEntryByIndex(@intCast(i));
+        const name = idx.getString(entry.name_offset);
+        if (std.mem.indexOf(u8, name, search_query) != null) {
+            try formula_matches.append(allocator, name);
+            try seen.put(name, {});
+        }
+    }
+
+    // Fuzzy matches (edit distance 1) for queries <= 8 chars.
+    if (search_query.len <= 8) {
+        for (0..count) |i| {
+            const entry = idx.getEntryByIndex(@intCast(i));
+            const name = idx.getString(entry.name_offset);
+            if (seen.contains(name)) continue;
+            if (fuzzy.editDistance(search_query, name) <= 1) {
+                try formula_matches.append(allocator, name);
+                try seen.put(name, {});
+            }
+        }
+    }
+
+    // Sort all formula matches alphabetically.
+    std.mem.sort([]const u8, formula_matches.items, {}, stringLessThan);
+
+    // Collect matching cask names (substring + fuzzy).
+    var cask_matches = std.ArrayList([]const u8){};
+    defer cask_matches.deinit(allocator);
+
+    var cask_seen = std.StringHashMap(void).init(allocator);
+    defer cask_seen.deinit();
+
+    if (CaskIndex.loadOrBuild(allocator, config.cache)) |*cask_idx| {
+        const cask_count = cask_idx.entryCount();
+
+        for (0..cask_count) |ci| {
+            const centry = cask_idx.getEntryByIndex(@intCast(ci));
+            const cask_name = cask_idx.getString(centry.token_offset);
+            if (std.mem.indexOf(u8, cask_name, search_query) != null) {
+                try cask_matches.append(allocator, cask_name);
+                try cask_seen.put(cask_name, {});
+            }
+        }
+
+        if (search_query.len <= 8) {
+            for (0..cask_count) |ci| {
+                const centry = cask_idx.getEntryByIndex(@intCast(ci));
+                const cask_name = cask_idx.getString(centry.token_offset);
+                if (cask_seen.contains(cask_name)) continue;
+                if (fuzzy.editDistance(search_query, cask_name) <= 1) {
+                    try cask_matches.append(allocator, cask_name);
+                    try cask_seen.put(cask_name, {});
+                }
+            }
+        }
+
+        std.mem.sort([]const u8, cask_matches.items, {}, stringLessThan);
+    } else |_| {}
+
+    // Output results.
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     const stdout = &w.interface;
 
     if (json_output) {
-        // Emit {"formulae":[...],"casks":[...]}
         try stdout.writeAll("{\"formulae\":[");
-        var first_f: bool = true;
-        for (0..count) |i| {
-            const entry = idx.getEntryByIndex(@intCast(i));
-            const name = idx.getString(entry.name_offset);
-            if (std.mem.indexOf(u8, name, search_query) != null) {
-                if (!first_f) try stdout.writeAll(",");
-                try writeJsonStr(stdout, name);
-                first_f = false;
-            }
+        for (formula_matches.items, 0..) |name, i| {
+            if (i > 0) try stdout.writeAll(",");
+            try writeJsonStr(stdout, name);
         }
         try stdout.writeAll("],\"casks\":[");
-        var first_c: bool = true;
-        if (CaskIndex.loadOrBuild(allocator, config.cache)) |*cask_idx| {
-            const cask_count = cask_idx.entryCount();
-            for (0..cask_count) |ci| {
-                const centry = cask_idx.getEntryByIndex(@intCast(ci));
-                const cask_name = cask_idx.getString(centry.token_offset);
-                if (std.mem.indexOf(u8, cask_name, search_query) != null) {
-                    if (!first_c) try stdout.writeAll(",");
-                    try writeJsonStr(stdout, cask_name);
-                    first_c = false;
-                }
-            }
-        } else |_| {}
+        for (cask_matches.items, 0..) |name, i| {
+            if (i > 0) try stdout.writeAll(",");
+            try writeJsonStr(stdout, name);
+        }
         try stdout.writeAll("]}\n");
         try stdout.flush();
         return;
     }
 
-    var found: bool = false;
-    for (0..count) |i| {
-        const entry = idx.getEntryByIndex(@intCast(i));
-        const name = idx.getString(entry.name_offset);
-        if (std.mem.indexOf(u8, name, search_query) != null) {
-            try stdout.print("{s}\n", .{name});
-            found = true;
-        }
+    for (formula_matches.items) |name| {
+        try stdout.print("{s}\n", .{name});
     }
-    // Also search cask index
-    if (CaskIndex.loadOrBuild(allocator, config.cache)) |*cask_idx| {
-        const cask_count = cask_idx.entryCount();
-        for (0..cask_count) |ci| {
-            const centry = cask_idx.getEntryByIndex(@intCast(ci));
-            const cask_name = cask_idx.getString(centry.token_offset);
-            if (std.mem.indexOf(u8, cask_name, search_query) != null) {
-                try stdout.print("{s} (cask)\n", .{cask_name});
-                found = true;
-            }
-        }
-    } else |_| {}
-
+    if (formula_matches.items.len > 0 and cask_matches.items.len > 0) {
+        try stdout.print("\n", .{});
+    }
+    for (cask_matches.items) |name| {
+        try stdout.print("{s} (cask)\n", .{name});
+    }
     try stdout.flush();
 
-    if (!found) {
+    if (formula_matches.items.len == 0 and cask_matches.items.len == 0) {
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
         const stderr_w = &ew.interface;
@@ -110,6 +147,10 @@ pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config)
         try stderr_w.flush();
         std.process.exit(1);
     }
+}
+
+fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 // ---------------------------------------------------------------------------
