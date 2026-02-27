@@ -128,15 +128,7 @@ pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config)
         return;
     }
 
-    for (formula_matches.items) |name| {
-        try stdout.print("{s}\n", .{name});
-    }
-    if (formula_matches.items.len > 0 and cask_matches.items.len > 0) {
-        try stdout.print("\n", .{});
-    }
-    for (cask_matches.items) |name| {
-        try stdout.print("{s} (cask)\n", .{name});
-    }
+    try writeSearchResults(stdout, formula_matches.items, cask_matches.items);
     try stdout.flush();
 
     if (formula_matches.items.len == 0 and cask_matches.items.len == 0) {
@@ -154,9 +146,106 @@ fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Write non-JSON search results to the given writer using brew-style section
+/// headers when both formulae and cask matches are present.
+fn writeSearchResults(writer: anytype, formula_matches: []const []const u8, cask_matches: []const []const u8) !void {
+    const both = formula_matches.len > 0 and cask_matches.len > 0;
+
+    if (both) {
+        try writer.writeAll("==> Formulae\n");
+    }
+    for (formula_matches) |name| {
+        try writer.print("{s}\n", .{name});
+    }
+    if (both) {
+        try writer.writeAll("\n==> Casks\n");
+    }
+    for (cask_matches) |name| {
+        try writer.print("{s}\n", .{name});
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 test "searchCmd compiles and has correct signature" {
     // Smoke test: verifies the function signature is correct and the module compiles.
+}
+
+test "search output: mixed results show section headers" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeSearchResults(writer, &.{ "firefoxpwa" }, &.{ "firefox", "firefox@beta" });
+
+    const output = fbs.getWritten();
+    const expected =
+        \\==> Formulae
+        \\firefoxpwa
+        \\
+        \\==> Casks
+        \\firefox
+        \\firefox@beta
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, output);
+}
+
+test "search output: formula-only results have no headers" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeSearchResults(writer, &.{ "bat", "bat-extras" }, &.{});
+
+    const output = fbs.getWritten();
+    const expected =
+        \\bat
+        \\bat-extras
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, output);
+}
+
+test "search output: cask-only results have no headers" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeSearchResults(writer, &.{}, &.{ "firefox", "firefox@beta" });
+
+    const output = fbs.getWritten();
+    const expected =
+        \\firefox
+        \\firefox@beta
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, output);
+}
+
+test "search output: no (cask) suffix in output" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeSearchResults(writer, &.{"firefoxpwa"}, &.{ "firefox", "firefox@beta" });
+
+    const output = fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, output, "(cask)") == null);
+}
+
+test "search output: no results produces no output" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    try writeSearchResults(writer, &.{}, &.{});
+
+    const output = fbs.getWritten();
+    try std.testing.expectEqualStrings("", output);
 }

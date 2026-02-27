@@ -82,7 +82,7 @@ compare "list" list
 compare "list --versions" list --versions
 compare "leaves" leaves
 compare_exact "outdated" outdated
-compare "search bat" search bat
+compare_exact "search bat" search bat
 compare_exact "deps bat" deps bat
 compare_loose "info bat" info bat
 compare "uses libgit2 --installed" uses libgit2 --installed
