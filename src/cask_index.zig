@@ -301,22 +301,41 @@ pub const CaskIndex = struct {
         };
     }
 
+    /// Release an mmap'd cask index. Does not use the allocator.
+    fn munmapCaskIndex(idx: CaskIndex) void {
+        const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(idx.data);
+        posix.munmap(aligned);
+    }
+
     /// Load an existing index from disk, or build one from the JWS cache.
+    /// Rebuilds if the JWS source file is newer than the cached index.
     pub fn loadOrBuild(allocator: Allocator, cache_dir: []const u8) !CaskIndex {
         // 1. Try loading existing index from disk.
         var idx_path_buf: [1024]u8 = undefined;
         const idx_path = std.fmt.bufPrint(&idx_path_buf, "{s}/api/cask.bru.idx", .{cache_dir}) catch
             return error.PathTooLong;
 
-        if (try openFromDisk(idx_path)) |idx| {
-            return idx;
-        }
-
-        // 2. Read the JWS file.
         var jws_path_buf: [1024]u8 = undefined;
         const jws_path = std.fmt.bufPrint(&jws_path_buf, "{s}/api/cask.jws.json", .{cache_dir}) catch
             return error.PathTooLong;
 
+        if (try openFromDisk(idx_path)) |idx| {
+            // Check if the JWS source is newer than the cached index.
+            const stale = blk: {
+                const idx_file = std.fs.openFileAbsolute(idx_path, .{}) catch break :blk true;
+                defer idx_file.close();
+                const jws_file = std.fs.openFileAbsolute(jws_path, .{}) catch break :blk false;
+                defer jws_file.close();
+                const idx_stat = idx_file.stat() catch break :blk true;
+                const jws_stat = jws_file.stat() catch break :blk false;
+                break :blk jws_stat.mtime > idx_stat.mtime;
+            };
+            if (!stale) return idx;
+            // Stale: unmap and rebuild below.
+            munmapCaskIndex(idx);
+        }
+
+        // 2. Read the JWS file.
         const jws_file = try std.fs.openFileAbsolute(jws_path, .{});
         defer jws_file.close();
 

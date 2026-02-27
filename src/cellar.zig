@@ -1,17 +1,18 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const PkgVersion = @import("version.zig").PkgVersion;
 
 /// A formula installed in the Homebrew Cellar with its version history.
 pub const InstalledFormula = struct {
     name: []const u8,
     versions: []const []const u8,
 
-    /// Return the latest version string (lexicographically highest).
+    /// Return the latest version string (semantically highest).
     pub fn latestVersion(self: InstalledFormula) []const u8 {
         var latest = self.versions[0];
         for (self.versions[1..]) |v| {
-            if (mem.order(u8, v, latest) == .gt) latest = v;
+            if (PkgVersion.parse(v).order(PkgVersion.parse(latest)) == .gt) latest = v;
         }
         return latest;
     }
@@ -119,6 +120,26 @@ fn formulaLessThan(_: void, a: InstalledFormula, b: InstalledFormula) bool {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "latestVersion uses semantic ordering not lexicographic" {
+    // "14.9" > "14.13" lexicographically (because '9' > '1'), but
+    // semantically 14.13 > 14.9. latestVersion should return "14.13".
+    const versions = [_][]const u8{ "14.9", "14.13" };
+    const formula = InstalledFormula{
+        .name = "postgresql@14",
+        .versions = &versions,
+    };
+    try std.testing.expectEqualStrings("14.13", formula.latestVersion());
+}
+
+test "latestVersion handles revision suffixes" {
+    const versions = [_][]const u8{ "3.6.1_1", "3.6.1_2" };
+    const formula = InstalledFormula{
+        .name = "test-formula",
+        .versions = &versions,
+    };
+    try std.testing.expectEqualStrings("3.6.1_2", formula.latestVersion());
+}
 
 test "Cellar isInstalled on real cellar" {
     const cellar = Cellar.init("/opt/homebrew/Cellar");
