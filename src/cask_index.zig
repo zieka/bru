@@ -445,6 +445,29 @@ test "lookup missing returns null" {
     try std.testing.expect(idx.lookup("firefoxes") == null);
 }
 
+test "loadOrBuild from real cache" {
+    const allocator = std.testing.allocator;
+
+    const home = std.posix.getenv("HOME") orelse return;
+    var buf: [512]u8 = undefined;
+    const cache_dir = std.fmt.bufPrint(&buf, "{s}/Library/Caches/Homebrew", .{home}) catch return;
+
+    // Delete any existing .idx file so we exercise the full build path.
+    var idx_buf: [1024]u8 = undefined;
+    const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/cask.bru.idx", .{cache_dir}) catch return;
+    std.fs.deleteFileAbsolute(idx_path) catch {};
+
+    var idx = CaskIndex.loadOrBuild(allocator, cache_dir) catch return;
+    defer idx.deinit();
+
+    // Should have >1000 cask entries.
+    try std.testing.expect(idx.entryCount() > 1000);
+
+    // Lookup "firefox".
+    const entry = idx.lookup("firefox") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("firefox", idx.getString(entry.token_offset));
+}
+
 test "deprecated and disabled flags" {
     const allocator = std.testing.allocator;
 
