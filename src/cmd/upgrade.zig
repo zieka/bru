@@ -79,7 +79,7 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
         if (installed_pv.order(index_pv) == .lt) {
             try to_upgrade.append(allocator, .{
                 .name = name,
-                .installed_version = installed_latest,
+                .installed_version = try allocator.dupe(u8, installed_latest),
                 .index_version = index_pv,
             });
         } else {
@@ -111,8 +111,8 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
             if (installed_pv.order(index_pv) == .lt) {
                 try to_upgrade.append(allocator, .{
-                    .name = formula.name,
-                    .installed_version = formula.latestVersion(),
+                    .name = try allocator.dupe(u8, formula.name),
+                    .installed_version = try allocator.dupe(u8, formula.latestVersion()),
                     .index_version = index_pv,
                 });
             }
