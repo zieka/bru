@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Config = @import("../config.zig").Config;
 const Index = @import("../index.zig").Index;
+const IndexEntry = @import("../index.zig").IndexEntry;
 const cask_index_mod = @import("../cask_index.zig");
 const CaskIndex = cask_index_mod.CaskIndex;
 const CaskIndexEntry = cask_index_mod.CaskIndexEntry;
@@ -67,76 +68,71 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         std.process.exit(1);
     };
 
+    const cellar = Cellar.init(config.cellar);
+
+    // --json: emit machine-readable JSON object
+    if (json_output) {
+        try printJson(allocator, &idx, entry, the_name, cellar);
+        return;
+    }
+
+    // === Normal human-readable output ===
+    try printHuman(allocator, &idx, entry, the_name, cellar, config);
+}
+
+/// Construct the GitHub source URL from a tap string and formula name.
+/// e.g. "homebrew/core" + "git" → "https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/g/git.rb"
+fn buildFromUrl(buf: []u8, tap: []const u8, name: []const u8) ?[]const u8 {
+    // Tap format: "org/repo" (e.g. "homebrew/core")
+    const slash = std.mem.indexOfScalar(u8, tap, '/') orelse return null;
+    if (slash == 0 or slash + 1 >= tap.len) return null;
+    const org_raw = tap[0..slash];
+    const repo_raw = tap[slash + 1 ..];
+    if (name.len == 0) return null;
+
+    // Capitalize first letter of org: "homebrew" → "Homebrew"
+    var org_buf: [128]u8 = undefined;
+    if (org_raw.len > org_buf.len) return null;
+    @memcpy(org_buf[0..org_raw.len], org_raw);
+    if (org_buf[0] >= 'a' and org_buf[0] <= 'z') {
+        org_buf[0] -= 32;
+    }
+    const org = org_buf[0..org_raw.len];
+
+    return std.fmt.bufPrint(buf, "https://github.com/{s}/homebrew-{s}/blob/HEAD/Formula/{c}/{s}.rb", .{ org, repo_raw, name[0], name }) catch null;
+}
+
+/// Print human-readable info output matching brew's format.
+fn printHuman(allocator: Allocator, idx: *const Index, entry: IndexEntry, the_name: []const u8, cellar: Cellar, config: Config) !void {
     const name = idx.getString(entry.name_offset);
     const version = idx.getString(entry.version_offset);
     const bottle_available = (entry.flags & 8) != 0;
+    const has_head = (entry.flags & 16) != 0;
     const desc = idx.getString(entry.desc_offset);
     const homepage = idx.getString(entry.homepage_offset);
     const license = idx.getString(entry.license_offset);
+    const tap = idx.getString(entry.tap_offset);
+    const caveats = idx.getString(entry.caveats_offset);
 
     const deps = try idx.getStringList(allocator, entry.deps_offset);
     defer allocator.free(deps);
     const build_deps = try idx.getStringList(allocator, entry.build_deps_offset);
     defer allocator.free(build_deps);
 
-    const cellar = Cellar.init(config.cellar);
-
-    // --json: emit machine-readable JSON object
-    if (json_output) {
-        const installed_versions = cellar.installedVersions(allocator, the_name);
-        const is_installed = installed_versions != null;
-        if (installed_versions) |versions| {
-            for (versions) |v| allocator.free(v);
-            allocator.free(versions);
-        }
-        var buf: [4096]u8 = undefined;
-        var w = std.fs.File.stdout().writer(&buf);
-        const stdout = &w.interface;
-
-        try stdout.writeAll("{\"name\":");
-        try writeJsonStr(stdout, name);
-        try stdout.writeAll(",\"full_name\":");
-        try writeJsonStr(stdout, idx.getString(entry.full_name_offset));
-        try stdout.writeAll(",\"version\":");
-        try writeJsonStr(stdout, version);
-        try stdout.print(",\"revision\":{d}", .{entry.revision});
-        try stdout.writeAll(",\"desc\":");
-        try writeJsonStr(stdout, desc);
-        try stdout.writeAll(",\"homepage\":");
-        try writeJsonStr(stdout, homepage);
-        try stdout.writeAll(",\"license\":");
-        try writeJsonStr(stdout, license);
-        try stdout.print(",\"installed\":{s}", .{if (is_installed) "true" else "false"});
-        try stdout.print(",\"bottle_available\":{s}", .{if (bottle_available) "true" else "false"});
-
-        try stdout.writeAll(",\"dependencies\":[");
-        for (deps, 0..) |dep, i| {
-            if (i > 0) try stdout.writeAll(",");
-            try writeJsonStr(stdout, dep);
-        }
-        try stdout.writeAll("]");
-
-        try stdout.writeAll(",\"build_dependencies\":[");
-        for (build_deps, 0..) |dep, i| {
-            if (i > 0) try stdout.writeAll(",");
-            try writeJsonStr(stdout, dep);
-        }
-        try stdout.writeAll("]");
-
-        try stdout.writeAll("}\n");
-        try stdout.flush();
-        return;
-    }
-
-    // === Normal human-readable output ===
     const out = Output.init(config.no_color);
 
-    // === Header: "==> name: stable version (bottled)" ===
+    // Check install status early (needed for header indicator)
+    const installed_versions = cellar.installedVersions(allocator, the_name);
+    const is_installed = installed_versions != null;
+
+    // === Header: "==> name ✓: stable version (bottled), HEAD" ===
     var header_buf: [512]u8 = undefined;
+    const indicator = if (config.no_emoji) "" else if (is_installed) " \xe2\x9c\x93" else " \xe2\x9c\x97";
+    const head_suffix = if (has_head) ", HEAD" else "";
     const header = if (bottle_available)
-        std.fmt.bufPrint(&header_buf, "{s}: stable {s} (bottled)", .{ name, version }) catch name
+        std.fmt.bufPrint(&header_buf, "{s}{s}: stable {s} (bottled){s}", .{ name, indicator, version, head_suffix }) catch name
     else
-        std.fmt.bufPrint(&header_buf, "{s}: stable {s}", .{ name, version }) catch name;
+        std.fmt.bufPrint(&header_buf, "{s}{s}: stable {s}{s}", .{ name, indicator, version, head_suffix }) catch name;
 
     out.section(header);
 
@@ -149,7 +145,7 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
     }
 
     // === Install status ===
-    if (cellar.installedVersions(allocator, the_name)) |versions| {
+    if (installed_versions) |versions| {
         defer {
             for (versions) |v| allocator.free(v);
             allocator.free(versions);
@@ -170,10 +166,17 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         out.print("Not installed\n", .{});
     }
 
+    // === From: line ===
+    var from_buf: [512]u8 = undefined;
+    if (buildFromUrl(&from_buf, tap, name)) |url| {
+        out.print("From: {s}\n", .{url});
+    }
+
     if (license.len > 0) {
         out.print("License: {s}\n", .{license});
     }
 
+    // === Dependencies ===
     if (build_deps.len > 0 or deps.len > 0) {
         out.section("Dependencies");
 
@@ -182,6 +185,13 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
             for (build_deps, 0..) |dep, i| {
                 if (i > 0) out.print(", ", .{});
                 out.print("{s}", .{dep});
+                if (!config.no_emoji) {
+                    if (cellar.isInstalled(dep)) {
+                        out.print(" \xe2\x9c\x93", .{});
+                    } else {
+                        out.print(" \xe2\x9c\x97", .{});
+                    }
+                }
             }
             out.print("\n", .{});
         }
@@ -191,10 +201,93 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
             for (deps, 0..) |dep, i| {
                 if (i > 0) out.print(", ", .{});
                 out.print("{s}", .{dep});
+                if (!config.no_emoji) {
+                    if (cellar.isInstalled(dep)) {
+                        out.print(" \xe2\x9c\x93", .{});
+                    } else {
+                        out.print(" \xe2\x9c\x97", .{});
+                    }
+                }
             }
             out.print("\n", .{});
         }
     }
+
+    // === Options ===
+    if (has_head) {
+        out.section("Options");
+        out.print("--HEAD\n\tInstall HEAD version\n", .{});
+    }
+
+    // === Caveats ===
+    if (caveats.len > 0) {
+        out.section("Caveats");
+        out.print("{s}\n", .{caveats});
+    }
+}
+
+/// Print JSON info output.
+fn printJson(allocator: Allocator, idx: *const Index, entry: IndexEntry, the_name: []const u8, cellar: Cellar) !void {
+    const name = idx.getString(entry.name_offset);
+    const version = idx.getString(entry.version_offset);
+    const bottle_available = (entry.flags & 8) != 0;
+    const has_head = (entry.flags & 16) != 0;
+    const desc = idx.getString(entry.desc_offset);
+    const homepage = idx.getString(entry.homepage_offset);
+    const license = idx.getString(entry.license_offset);
+    const caveats = idx.getString(entry.caveats_offset);
+
+    const deps = try idx.getStringList(allocator, entry.deps_offset);
+    defer allocator.free(deps);
+    const build_deps = try idx.getStringList(allocator, entry.build_deps_offset);
+    defer allocator.free(build_deps);
+
+    const installed_versions = cellar.installedVersions(allocator, the_name);
+    const is_installed = installed_versions != null;
+    if (installed_versions) |versions| {
+        for (versions) |v| allocator.free(v);
+        allocator.free(versions);
+    }
+
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    const stdout = &w.interface;
+
+    try stdout.writeAll("{\"name\":");
+    try writeJsonStr(stdout, name);
+    try stdout.writeAll(",\"full_name\":");
+    try writeJsonStr(stdout, idx.getString(entry.full_name_offset));
+    try stdout.writeAll(",\"version\":");
+    try writeJsonStr(stdout, version);
+    try stdout.print(",\"revision\":{d}", .{entry.revision});
+    try stdout.writeAll(",\"desc\":");
+    try writeJsonStr(stdout, desc);
+    try stdout.writeAll(",\"homepage\":");
+    try writeJsonStr(stdout, homepage);
+    try stdout.writeAll(",\"license\":");
+    try writeJsonStr(stdout, license);
+    try stdout.print(",\"installed\":{s}", .{if (is_installed) "true" else "false"});
+    try stdout.print(",\"bottle_available\":{s}", .{if (bottle_available) "true" else "false"});
+    try stdout.print(",\"has_head\":{s}", .{if (has_head) "true" else "false"});
+    try stdout.writeAll(",\"caveats\":");
+    try writeJsonStr(stdout, caveats);
+
+    try stdout.writeAll(",\"dependencies\":[");
+    for (deps, 0..) |dep, i| {
+        if (i > 0) try stdout.writeAll(",");
+        try writeJsonStr(stdout, dep);
+    }
+    try stdout.writeAll("]");
+
+    try stdout.writeAll(",\"build_dependencies\":[");
+    for (build_deps, 0..) |dep, i| {
+        if (i > 0) try stdout.writeAll(",");
+        try writeJsonStr(stdout, dep);
+    }
+    try stdout.writeAll("]");
+
+    try stdout.writeAll("}\n");
+    try stdout.flush();
 }
 
 /// Print formatted information about a cask (similar to formula info output).

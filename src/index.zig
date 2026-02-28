@@ -11,7 +11,7 @@ const FormulaInfo = formula_mod.FormulaInfo;
 
 pub const IndexHeader = extern struct {
     magic: [4]u8 = .{ 'B', 'R', 'U', 'I' },
-    version: u32 = 1,
+    version: u32 = 2,
     source_hash: [32]u8 = .{0} ** 32,
     entry_count: u32 = 0,
     _pad: [4]u8 = .{0} ** 4,
@@ -32,6 +32,7 @@ pub const IndexEntry = extern struct {
     tap_offset: u32 = 0,
     homepage_offset: u32 = 0,
     license_offset: u32 = 0,
+    caveats_offset: u32 = 0,
     bottle_root_url_offset: u32 = 0,
     bottle_sha256_offset: u32 = 0,
     bottle_cellar_offset: u32 = 0,
@@ -126,6 +127,7 @@ pub const Index = struct {
             if (f.deprecated) flags |= 2;
             if (f.disabled) flags |= 4;
             if (f.bottle_root_url.len > 0) flags |= 8;
+            if (f.has_head) flags |= 16;
 
             entries[i] = IndexEntry{
                 .name_offset = try stb.addString(allocator, f.name),
@@ -139,6 +141,7 @@ pub const Index = struct {
                 .tap_offset = try stb.addString(allocator, f.tap),
                 .homepage_offset = try stb.addString(allocator, f.homepage),
                 .license_offset = try stb.addString(allocator, f.license),
+                .caveats_offset = try stb.addString(allocator, f.caveats),
                 .bottle_root_url_offset = try stb.addString(allocator, f.bottle_root_url),
                 .bottle_sha256_offset = try stb.addString(allocator, f.bottle_sha256),
                 .bottle_cellar_offset = try stb.addString(allocator, f.bottle_cellar),
@@ -346,6 +349,13 @@ pub const Index = struct {
             return null;
         }
 
+        // Reject incompatible index versions (e.g. v1 without caveats/has_head).
+        const ver = mem.readInt(u32, data[4..8], .little);
+        if (ver != 2) {
+            posix.munmap(mapped);
+            return null;
+        }
+
         return Index{
             .data = data,
             .allocator = undefined, // mmap'd; caller should not use allocator
@@ -436,6 +446,8 @@ test "build and lookup" {
         .keg_only = false,
         .deprecated = false,
         .disabled = false,
+        .has_head = true,
+        .caveats = "Some caveat text",
         .dependencies = &deps,
         .build_dependencies = &build_deps,
         .bottle_root_url = "https://ghcr.io/v2/homebrew/core",
@@ -462,6 +474,7 @@ test "build and lookup" {
     try std.testing.expectEqualStrings("homebrew/core", idx.getString(entry.tap_offset));
     try std.testing.expectEqualStrings("https://github.com/sharkdp/bat", idx.getString(entry.homepage_offset));
     try std.testing.expectEqualStrings("Apache-2.0", idx.getString(entry.license_offset));
+    try std.testing.expectEqualStrings("Some caveat text", idx.getString(entry.caveats_offset));
     try std.testing.expectEqualStrings("https://ghcr.io/v2/homebrew/core", idx.getString(entry.bottle_root_url_offset));
     try std.testing.expectEqualStrings("abc123", idx.getString(entry.bottle_sha256_offset));
     try std.testing.expectEqualStrings(":any", idx.getString(entry.bottle_cellar_offset));
@@ -470,6 +483,8 @@ test "build and lookup" {
     try std.testing.expectEqual(@as(u16, 3), entry.revision);
     // bottle_available flag (bit 3) should be set since bottle_root_url is non-empty.
     try std.testing.expect(entry.flags & 8 != 0);
+    // has_head flag (bit 4) should be set.
+    try std.testing.expect(entry.flags & 16 != 0);
     // keg_only, deprecated, disabled should be unset.
     try std.testing.expectEqual(@as(u16, 0), entry.flags & 7);
 
@@ -507,6 +522,8 @@ test "lookup missing returns null" {
         .keg_only = false,
         .deprecated = false,
         .disabled = false,
+        .has_head = false,
+        .caveats = "",
         .dependencies = &.{},
         .build_dependencies = &.{},
         .bottle_root_url = "",
