@@ -54,7 +54,13 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     // Collect outdated formulae to upgrade.
     var to_upgrade: std.ArrayList(OutdatedFormula) = .{};
-    defer to_upgrade.deinit(allocator);
+    defer {
+        for (to_upgrade.items) |item| {
+            allocator.free(item.name);
+            allocator.free(item.installed_version);
+        }
+        to_upgrade.deinit(allocator);
+    }
 
     if (formula_name) |name| {
         // Specific formula requested — check if installed and outdated.
@@ -86,7 +92,7 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
         if (installed_pv.order(index_pv) == .lt) {
             try to_upgrade.append(allocator, .{
-                .name = name,
+                .name = try allocator.dupe(u8, name),
                 .installed_version = try allocator.dupe(u8, installed_latest),
                 .index_version = index_pv,
             });
