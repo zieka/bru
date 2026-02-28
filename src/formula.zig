@@ -17,6 +17,8 @@ pub const FormulaInfo = struct {
     disabled: bool,
     dependencies: []const []const u8,
     build_dependencies: []const []const u8,
+    has_head: bool,
+    caveats: []const u8,
     bottle_root_url: []const u8,
     bottle_sha256: []const u8,
     bottle_cellar: []const u8,
@@ -91,13 +93,21 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
     const license = try allocator.dupe(u8, jsonStr(obj, "license") orelse "");
     errdefer allocator.free(license);
 
-    // versions.stable
+    // versions.stable and versions.head
+    var has_head = false;
     const version = blk: {
         const versions_val = obj.get("versions") orelse break :blk try allocator.dupe(u8, "");
         const versions_obj = switch (versions_val) {
             .object => |o| o,
             else => break :blk try allocator.dupe(u8, ""),
         };
+        // HEAD is available if versions.head is a non-null string
+        if (versions_obj.get("head")) |head_val| {
+            has_head = switch (head_val) {
+                .string => true,
+                else => false,
+            };
+        }
         break :blk try allocator.dupe(u8, jsonStr(versions_obj, "stable") orelse "");
     };
     errdefer allocator.free(version);
@@ -113,6 +123,9 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
     const keg_only = jsonBool(obj, "keg_only") orelse false;
     const deprecated = jsonBool(obj, "deprecated") orelse false;
     const disabled = jsonBool(obj, "disabled") orelse false;
+
+    const caveats = try allocator.dupe(u8, jsonStr(obj, "caveats") orelse "");
+    errdefer allocator.free(caveats);
 
     const dependencies = try parseStringArray(allocator, obj, "dependencies");
     errdefer freeStringSlice(allocator, dependencies);
@@ -172,6 +185,8 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
         .keg_only = keg_only,
         .deprecated = deprecated,
         .disabled = disabled,
+        .has_head = has_head,
+        .caveats = caveats,
         .dependencies = dependencies,
         .build_dependencies = build_dependencies,
         .bottle_root_url = bottle_root_url,
@@ -189,6 +204,7 @@ pub fn freeFormula(allocator: Allocator, f: FormulaInfo) void {
     allocator.free(f.license);
     allocator.free(f.version);
     allocator.free(f.tap);
+    allocator.free(f.caveats);
     freeStringSlice(allocator, f.dependencies);
     freeStringSlice(allocator, f.build_dependencies);
     allocator.free(f.bottle_root_url);
@@ -282,6 +298,7 @@ test "parseFormulaJson parses small payload" {
         \\  "keg_only": false,
         \\  "deprecated": false,
         \\  "disabled": false,
+        \\  "caveats": null,
         \\  "dependencies": ["libgit2", "oniguruma"],
         \\  "build_dependencies": ["pkgconf", "rust"],
         \\  "bottle": {
@@ -318,6 +335,8 @@ test "parseFormulaJson parses small payload" {
     try std.testing.expect(!bat.keg_only);
     try std.testing.expect(!bat.deprecated);
     try std.testing.expect(!bat.disabled);
+    try std.testing.expect(bat.has_head);
+    try std.testing.expectEqualStrings("", bat.caveats);
 
     // Dependencies
     try std.testing.expectEqual(@as(usize, 2), bat.dependencies.len);
