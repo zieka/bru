@@ -13,6 +13,7 @@ pub const Config = struct {
     verbose: bool,
     debug: bool,
     quiet: bool,
+    timing: bool,
 
     allocator: Allocator,
 
@@ -67,6 +68,7 @@ pub const Config = struct {
             .verbose = false,
             .debug = false,
             .quiet = false,
+            .timing = false,
             .allocator = allocator,
         };
     }

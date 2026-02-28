@@ -27,6 +27,7 @@ pub const ParsedArgs = struct {
     verbose: bool,
     debug: bool,
     quiet: bool,
+    timing: bool,
     help: bool,
     version: bool,
 };
@@ -80,6 +81,7 @@ pub fn parseArgs(argv: []const []const u8) ParsedArgs {
         .verbose = false,
         .debug = false,
         .quiet = false,
+        .timing = false,
         .help = false,
         .version = false,
     };
@@ -105,6 +107,11 @@ pub fn parseArgs(argv: []const []const u8) ParsedArgs {
         }
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             result.quiet = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--timing")) {
+            result.timing = true;
             i += 1;
             continue;
         }

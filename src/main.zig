@@ -22,6 +22,7 @@ pub fn main() !void {
     if (parsed.verbose) cfg.verbose = true;
     if (parsed.debug) cfg.debug = true;
     if (parsed.quiet) cfg.quiet = true;
+    if (parsed.timing) cfg.timing = true;
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -107,4 +108,5 @@ test {
     _ = @import("linker.zig");
     _ = @import("json_helpers.zig");
     _ = @import("fuzzy.zig");
+    _ = @import("timer.zig");
 }
