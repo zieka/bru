@@ -4,6 +4,7 @@ const Config = @import("../config.zig").Config;
 const Index = @import("../index.zig").Index;
 const download = @import("../download.zig");
 const Download = download.Download;
+const HttpClient = @import("../http.zig").HttpClient;
 const Output = @import("../output.zig").Output;
 
 /// Download a bottle for a formula without installing it.
@@ -57,7 +58,10 @@ pub fn fetchCmd(allocator: Allocator, args: []const []const u8, config: Config) 
     defer allocator.free(section_title);
     out.section(section_title);
 
-    var dl = Download.init(allocator, config.cache);
+    var http_client = HttpClient.init(allocator);
+    defer http_client.deinit();
+
+    var dl = Download.init(allocator, config.cache, &http_client);
     const cached_path = try dl.fetchBottle(url, formula_name, bottle_sha256);
     defer allocator.free(cached_path);
 

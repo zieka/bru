@@ -2,25 +2,30 @@ const std = @import("std");
 
 pub const HttpClient = struct {
     allocator: std.mem.Allocator,
+    client: std.http.Client,
 
     pub fn init(allocator: std.mem.Allocator) HttpClient {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .client = .{ .allocator = allocator } };
+    }
+
+    pub fn deinit(self: *HttpClient) void {
+        self.client.deinit();
     }
 
     /// Download a URL to a file path.
-    pub fn fetch(self: HttpClient, url: []const u8, dest_path: []const u8) !void {
+    pub fn fetch(self: *HttpClient, url: []const u8, dest_path: []const u8) !void {
         try self.fetchInner(url, dest_path, .{}, &.{});
     }
 
     /// Download from GHCR with anonymous auth header (Authorization: Bearer QQ==).
-    pub fn fetchGhcr(self: HttpClient, url: []const u8, dest_path: []const u8) !void {
+    pub fn fetchGhcr(self: *HttpClient, url: []const u8, dest_path: []const u8) !void {
         try self.fetchInner(url, dest_path, .{
             .authorization = .{ .override = "Bearer QQ==" },
         }, &.{});
     }
 
     fn fetchInner(
-        self: HttpClient,
+        self: *HttpClient,
         url: []const u8,
         dest_path: []const u8,
         headers: std.http.Client.Request.Headers,
@@ -40,16 +45,12 @@ pub const HttpClient = struct {
         const file = try std.fs.cwd().createFile(dest_path, .{});
         defer file.close();
 
-        // Set up HTTP client.
-        var client: std.http.Client = .{ .allocator = self.allocator };
-        defer client.deinit();
-
         // Create a file-backed writer for the response body.
         var write_buf: [8192]u8 = undefined;
         var file_writer = file.writer(&write_buf);
 
         // Use the high-level fetch API which handles redirects automatically.
-        const result = try client.fetch(.{
+        const result = try self.client.fetch(.{
             .location = .{ .url = url },
             .headers = headers,
             .extra_headers = extra_headers,
@@ -86,7 +87,8 @@ test "HttpClient fetch downloads a file" {
     });
     defer allocator.free(dest_path);
 
-    const client = HttpClient.init(allocator);
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
     try client.fetch(
         "https://httpbin.org/get",
         dest_path,
@@ -115,7 +117,8 @@ test "HttpClient fetchGhcr with auth header" {
     });
     defer allocator.free(dest_path);
 
-    const client = HttpClient.init(allocator);
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
     try client.fetchGhcr(
         "https://ghcr.io/v2/homebrew/core/jq/blobs/sha256:4b3576df4065747bf8c3b95c0a3eebc5f003a30819a645d9cc459bb06259c8ae",
         dest_path,

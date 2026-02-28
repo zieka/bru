@@ -38,7 +38,8 @@ pub fn updateCmd(allocator: Allocator, args: []const []const u8, config: Config)
     };
 
     // Download fresh formula.jws.json from the Homebrew API.
-    const client = HttpClient.init(allocator);
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
     client.fetch("https://formulae.brew.sh/api/formula.jws.json", jws_path) catch |err| {
         const err_out = Output.initErr(config.no_color);
         err_out.err("Failed to download formula data: {s}", .{@errorName(err)});
