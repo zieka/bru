@@ -12,6 +12,9 @@ const Tab = tab_mod.Tab;
 const RuntimeDep = tab_mod.RuntimeDep;
 const Output = @import("../output.zig").Output;
 const fuzzy = @import("../fuzzy.zig");
+const timer_mod = @import("../timer.zig");
+const Timer = timer_mod.Timer;
+const Trace = timer_mod.Trace;
 
 /// Install a formula from a pre-built bottle.
 ///
@@ -41,8 +44,18 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
 
+    // Initialize trace for timing/profiling.
+    var trace = Trace.init(allocator, config.timing);
+    defer trace.deinit();
+    trace.formula_name = name;
+
+    // Start total timer.
+    var total_timer = Timer.start(&trace, "total");
+
     // 2. Look up in index.
+    var index_timer = Timer.start(&trace, "index");
     var idx = try Index.loadOrBuild(allocator, config.cache);
+    index_timer.stop();
     // Note: do not call idx.deinit() -- the index may be mmap'd (from disk)
     // in which case the allocator field is undefined. The process exits after
     // this command so OS reclamation is sufficient.
@@ -66,6 +79,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     }
 
     // 4. Check and install dependencies.
+    var deps_timer = Timer.start(&trace, "deps");
     {
         const dep_names_for_install = try idx.getStringList(allocator, entry.deps_offset);
         defer allocator.free(dep_names_for_install);
@@ -93,6 +107,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
             out.print("\n", .{});
         }
     }
+    deps_timer.stop();
 
     // 5. Check bottle availability.
     const bottle_root_url = idx.getString(entry.bottle_root_url_offset);
@@ -121,18 +136,26 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     out.print("Downloading {s}...\n", .{name});
 
     var dl = Download.init(allocator, config.cache);
+
+    var download_timer = Timer.start(&trace, "download");
     const archive_path = try dl.fetchBottle(url, name, bottle_sha256);
+    download_timer.stop();
     defer allocator.free(archive_path);
 
     // 8. Extract bottle.
     out.print("Pouring {s} {s}...\n", .{ name, version });
 
     var bottle = Bottle.init(allocator, config);
+
+    var extract_timer = Timer.start(&trace, "extract");
     const keg_path = try bottle.pour(archive_path, name, version);
+    extract_timer.stop();
     defer allocator.free(keg_path);
 
     // 9. Replace placeholders.
+    var placeholders_timer = Timer.start(&trace, "placeholders");
     try bottle.replacePlaceholders(keg_path);
+    placeholders_timer.stop();
 
     // 10. Build runtime_dependencies from the formula's dependency list.
     const dep_names = try idx.getStringList(allocator, entry.deps_offset);
@@ -178,6 +201,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     }
 
     // 11. Write install receipt (tab).
+    var receipt_timer = Timer.start(&trace, "receipt");
     const tab = Tab{
         .installed_on_request = true,
         .poured_from_bottle = true,
@@ -189,8 +213,10 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         .source_tap = "homebrew/core",
     };
     try tab.writeToKeg(allocator, keg_path);
+    receipt_timer.stop();
 
     // 12. Link into prefix.
+    var link_timer = Timer.start(&trace, "link");
     const keg_only = (entry.flags & 1) != 0;
     var linker = Linker.init(allocator, config.prefix);
 
@@ -199,6 +225,16 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     } else {
         try linker.link(name, keg_path);
     }
+    link_timer.stop();
+
+    // Stop total timer.
+    total_timer.stop();
+
+    // Print timing breakdown if --timing was set.
+    trace.printTimings();
+
+    // Write trace file if -Dtrace was set at build time.
+    trace.writeTraceFile("bru-trace.json");
 
     // 13. Print completion.
     const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ name, version });
