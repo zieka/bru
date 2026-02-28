@@ -103,6 +103,7 @@ test {
     _ = @import("cask_index.zig");
     _ = @import("version.zig");
     _ = @import("http.zig");
+    _ = @import("batch_download.zig");
     _ = @import("download.zig");
     _ = @import("bottle.zig");
     _ = @import("linker.zig");
