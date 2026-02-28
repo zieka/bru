@@ -4,9 +4,10 @@ const HttpClient = @import("http.zig").HttpClient;
 pub const Download = struct {
     allocator: std.mem.Allocator,
     cache_dir: []const u8,
+    http_client: *HttpClient,
 
-    pub fn init(allocator: std.mem.Allocator, cache_dir: []const u8) Download {
-        return .{ .allocator = allocator, .cache_dir = cache_dir };
+    pub fn init(allocator: std.mem.Allocator, cache_dir: []const u8, http_client: *HttpClient) Download {
+        return .{ .allocator = allocator, .cache_dir = cache_dir, .http_client = http_client };
     }
 
     /// Return the cache path for a URL.
@@ -42,8 +43,7 @@ pub const Download = struct {
         };
 
         // Download via HttpClient.fetchGhcr.
-        const client = HttpClient.init(self.allocator);
-        try client.fetchGhcr(url, path);
+        try self.http_client.fetchGhcr(url, path);
 
         // Verify checksum after download.
         const valid = try verifySha256(path, expected_sha256);
@@ -104,7 +104,9 @@ pub fn ghcrImageName(allocator: std.mem.Allocator, name: []const u8) ![]const u8
 
 test "cachePath produces deterministic path" {
     const allocator = std.testing.allocator;
-    const dl = Download.init(allocator, "/tmp/bru-test-cache");
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    const dl = Download.init(allocator, "/tmp/bru-test-cache", &client);
 
     const path1 = try dl.cachePath("https://example.com/bottle.tar.gz", "myformula");
     defer allocator.free(path1);

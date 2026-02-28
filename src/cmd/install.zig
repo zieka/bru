@@ -15,6 +15,7 @@ const fuzzy = @import("../fuzzy.zig");
 const timer_mod = @import("../timer.zig");
 const Timer = timer_mod.Timer;
 const Trace = timer_mod.Trace;
+const HttpClient = @import("../http.zig").HttpClient;
 const collectTransitiveDeps = @import("deps.zig").collectTransitiveDeps;
 
 /// Install a formula from a pre-built bottle.
@@ -49,6 +50,9 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     var trace = Trace.init(allocator, config.timing);
     defer trace.deinit();
     trace.formula_name = name;
+
+    var http_client = HttpClient.init(allocator);
+    defer http_client.deinit();
 
     // Start total timer.
     var total_timer = Timer.start(&trace, "total");
@@ -95,7 +99,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         }
 
         if (missing_deps.items.len > 0) {
-            prefetchBottles(allocator, &idx, cellar, name, config, &trace);
+            prefetchBottles(allocator, &idx, cellar, name, config, &trace, &http_client);
             out.section("Installing dependencies");
             for (missing_deps.items) |dep_name| {
                 out.print("Installing dependency: {s}...\n", .{dep_name});
@@ -137,7 +141,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     out.print("Downloading {s}...\n", .{name});
 
-    var dl = Download.init(allocator, config.cache);
+    var dl = Download.init(allocator, config.cache, &http_client);
 
     var download_timer = Timer.start(&trace, "download");
     const archive_path = try dl.fetchBottle(url, name, bottle_sha256);
@@ -258,6 +262,7 @@ const WorkerContext = struct {
     tasks: []const DownloadTask,
     next_index: *usize,
     cache_dir: []const u8,
+    http_client: *HttpClient,
 };
 
 /// Worker thread: claims tasks via atomic counter and downloads bottles.
@@ -272,7 +277,7 @@ fn downloadWorker(ctx: WorkerContext) void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
 
-        var dl = Download.init(arena.allocator(), ctx.cache_dir);
+        var dl = Download.init(arena.allocator(), ctx.cache_dir, ctx.http_client);
         _ = dl.fetchBottle(task.url, task.name, task.sha256) catch continue;
     }
 }
@@ -308,6 +313,7 @@ fn prefetchBottles(
     name: []const u8,
     config: Config,
     trace: *Trace,
+    http_client: *HttpClient,
 ) void {
     // 1. Collect full transitive dependency closure.
     var visited = std.StringHashMap(void).init(allocator);
@@ -343,6 +349,7 @@ fn prefetchBottles(
         .tasks = tasks.items,
         .next_index = &next_index,
         .cache_dir = config.cache,
+        .http_client = http_client,
     };
 
     var threads: [max_workers]std.Thread = undefined;
