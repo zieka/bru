@@ -1,14 +1,29 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig").Config;
 const dispatch = @import("dispatch.zig");
 const fallback = @import("fallback.zig");
 const help = @import("help.zig");
 
 pub fn main() !void {
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_instance.deinit();
-    const allocator = gpa_instance.allocator();
+    // Release builds: arena allocator with thread-safe wrapper. Every alloc()
+    // is a pointer bump; every free() is a no-op. The process exits after one
+    // command, so OS reclamation handles cleanup — "the missile knows when it
+    // hits."
+    //
+    // Debug builds: GPA for leak detection during development.
+    if (builtin.mode == .Debug) {
+        var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa_instance.deinit();
+        try run(gpa_instance.allocator());
+    } else {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        var ts = std.heap.ThreadSafeAllocator{ .child_allocator = arena.allocator() };
+        try run(ts.allocator());
+    }
+}
 
+fn run(allocator: std.mem.Allocator) !void {
     var cfg = try Config.load(allocator);
     defer cfg.deinit();
 
