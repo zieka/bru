@@ -23,37 +23,66 @@ pub const Download = struct {
         return std.fmt.allocPrint(self.allocator, "{s}/downloads/{s}--{s}", .{ self.cache_dir, hex, name });
     }
 
-    /// Download a bottle, using cache if available and checksum matches.
-    /// Returns the cache path (caller owns the string).
-    pub fn fetchBottle(self: Download, url: []const u8, name: []const u8, expected_sha256: []const u8) ![]const u8 {
-        const path = try self.cachePath(url, name);
-        errdefer self.allocator.free(path);
+    /// Return the blob store path for a content-addressed file.
+    /// Format: {cache_dir}/blobs/{sha256}.tar.gz
+    pub fn blobPath(self: Download, sha256: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "{s}/blobs/{s}.tar.gz", .{ self.cache_dir, sha256 });
+    }
 
-        // Check if cached file exists and checksum matches.
-        if (verifySha256(path, expected_sha256) catch false) {
-            return path;
+    /// Download a bottle, using cache if available and checksum matches.
+    /// Returns the blob path (caller owns the string).
+    pub fn fetchBottle(self: Download, url: []const u8, name: []const u8, expected_sha256: []const u8) ![]const u8 {
+        const blob = try self.blobPath(expected_sha256);
+        errdefer self.allocator.free(blob);
+
+        // 1. Check blob store first (content-addressed by SHA256).
+        if (verifySha256(blob, expected_sha256) catch false) {
+            return blob;
         }
 
-        // Ensure the downloads directory exists.
-        const downloads_dir = try std.fmt.allocPrint(self.allocator, "{s}/downloads", .{self.cache_dir});
-        defer self.allocator.free(downloads_dir);
-        std.fs.cwd().makePath(downloads_dir) catch |err| switch (err) {
+        // 2. Check legacy cache path for backward compatibility.
+        const legacy = try self.cachePath(url, name);
+        defer self.allocator.free(legacy);
+
+        if (verifySha256(legacy, expected_sha256) catch false) {
+            // Ensure the blobs directory exists.
+            const blobs_dir = try std.fmt.allocPrint(self.allocator, "{s}/blobs", .{self.cache_dir});
+            defer self.allocator.free(blobs_dir);
+            std.fs.cwd().makePath(blobs_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+
+            // 3. Migrate: rename legacy file to blob store.
+            std.fs.cwd().rename(legacy, blob) catch {
+                // If rename fails (e.g. cross-device), copy instead.
+                const cwd = std.fs.cwd();
+                cwd.copyFile(legacy, cwd, blob, .{}) catch return error.MigrationFailed;
+                std.fs.cwd().deleteFile(legacy) catch {};
+            };
+            return blob;
+        }
+
+        // 4. Not found anywhere — ensure the blobs directory exists, then download.
+        const blobs_dir = try std.fmt.allocPrint(self.allocator, "{s}/blobs", .{self.cache_dir});
+        defer self.allocator.free(blobs_dir);
+        std.fs.cwd().makePath(blobs_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
         // Download via HttpClient.fetchGhcr.
-        try self.http_client.fetchGhcr(url, path);
+        try self.http_client.fetchGhcr(url, blob);
 
-        // Verify checksum after download.
-        const valid = try verifySha256(path, expected_sha256);
+        // 5. Verify checksum after download.
+        const valid = try verifySha256(blob, expected_sha256);
         if (!valid) {
             // Delete the bad file and return error.
-            std.fs.cwd().deleteFile(path) catch {};
+            std.fs.cwd().deleteFile(blob) catch {};
             return error.ChecksumMismatch;
         }
 
-        return path;
+        return blob;
     }
 };
 
@@ -122,6 +151,32 @@ test "cachePath produces deterministic path" {
 
     // Path should end with "--myformula".
     try std.testing.expect(std.mem.endsWith(u8, path1, "--myformula"));
+}
+
+test "blobPath produces content-addressed path" {
+    const allocator = std.testing.allocator;
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    const dl = Download.init(allocator, "/tmp/bru-test-cache", &client);
+
+    const sha = "abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
+    const path = try dl.blobPath(sha);
+    defer allocator.free(path);
+
+    // Path should be {cache_dir}/blobs/{sha256}.tar.gz
+    try std.testing.expectEqualStrings("/tmp/bru-test-cache/blobs/abc123def456abc123def456abc123def456abc123def456abc123def456abcd.tar.gz", path);
+
+    // Path should contain "blobs/".
+    try std.testing.expect(std.mem.indexOf(u8, path, "blobs/") != null);
+
+    // Path should end with ".tar.gz".
+    try std.testing.expect(std.mem.endsWith(u8, path, ".tar.gz"));
+
+    // Different SHA should produce a different path.
+    const sha2 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const path2 = try dl.blobPath(sha2);
+    defer allocator.free(path2);
+    try std.testing.expect(!std.mem.eql(u8, path, path2));
 }
 
 test "verifySha256 on known content" {

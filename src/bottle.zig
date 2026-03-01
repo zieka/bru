@@ -3,6 +3,7 @@ const fs = std.fs;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Config = @import("config.zig").Config;
+const clonefile_mod = @import("clonefile.zig");
 
 /// Pre-allocated pool of 1MB buffers for parallel file extraction.
 /// Main thread claims buffers to read tar file content into, then hands
@@ -180,6 +181,13 @@ fn createSymlink(dir: fs.Dir, link_name: []const u8, file_name: []const u8) !voi
     };
 }
 
+/// Check whether a directory exists at the given absolute path.
+fn dirExists(path: []const u8) bool {
+    var dir = fs.openDirAbsolute(path, .{}) catch return false;
+    dir.close();
+    return true;
+}
+
 /// Handles extraction and post-processing of Homebrew bottle archives.
 pub const Bottle = struct {
     allocator: Allocator,
@@ -301,6 +309,106 @@ pub const Bottle = struct {
             name,
             version,
         });
+    }
+
+    /// Extract a bottle with a two-tier extracted-keg cache.
+    ///
+    /// Fast path: if an extracted keg for `bottle_sha256` already exists in
+    /// `keg_cache_dir`, clone it straight into the cellar.
+    /// Slow path: extract via `pour`, then best-effort clone the result into
+    /// the cache for next time.
+    ///
+    /// Cache layout: `{keg_cache_dir}/{sha256}/{name}/{version}/...`
+    /// Caller owns the returned keg path string.
+    pub fn pourWithCache(
+        self: Bottle,
+        archive_path: []const u8,
+        name: []const u8,
+        version: []const u8,
+        bottle_sha256: []const u8,
+        keg_cache_dir: []const u8,
+    ) ![]const u8 {
+        // Build the cache source path: {keg_cache_dir}/{sha256}
+        const cache_sha_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
+            keg_cache_dir,
+            bottle_sha256,
+        });
+        defer self.allocator.free(cache_sha_dir);
+
+        // Build the full cache keg path: {keg_cache_dir}/{sha256}/{name}/{version}
+        const cache_keg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{
+            cache_sha_dir,
+            name,
+            version,
+        });
+        defer self.allocator.free(cache_keg_path);
+
+        // Build the cellar keg path: {cellar}/{name}/{version}
+        const keg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{
+            self.cellar,
+            name,
+            version,
+        });
+        errdefer self.allocator.free(keg_path);
+
+        // --- Fast path: cache hit ----------------------------------------
+        if (dirExists(cache_sha_dir)) {
+            // Ensure the cellar name directory exists ({cellar}/{name}).
+            const cellar_name_dir = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
+                self.cellar,
+                name,
+            });
+            defer self.allocator.free(cellar_name_dir);
+
+            fs.makeDirAbsolute(self.cellar) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+            fs.makeDirAbsolute(cellar_name_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+
+            // Clone from cache to cellar.
+            if (clonefile_mod.cloneTree(cache_keg_path, keg_path)) |_| {
+                return keg_path;
+            } else |_| {
+                // cloneTree failed — clean up any partial clone before
+                // falling through to slow path (pour needs a clean slate).
+                fs.deleteTreeAbsolute(keg_path) catch {};
+            }
+        }
+
+        // --- Slow path: extract normally ---------------------------------
+        // pour() allocates and returns its own keg path string. We already
+        // have keg_path with the same value, so free the duplicate from pour.
+        const pour_keg_path = try self.pour(archive_path, name, version);
+        self.allocator.free(pour_keg_path);
+
+        // Best-effort: populate the cache for next time.
+        // Create cache parent dirs: {keg_cache_dir}/{sha256}/{name}
+        const cache_name_dir = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
+            cache_sha_dir,
+            name,
+        }) catch return keg_path;
+        defer self.allocator.free(cache_name_dir);
+
+        fs.makeDirAbsolute(keg_cache_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return keg_path,
+        };
+        fs.makeDirAbsolute(cache_sha_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return keg_path,
+        };
+        fs.makeDirAbsolute(cache_name_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return keg_path,
+        };
+
+        _ = clonefile_mod.cloneTree(keg_path, cache_keg_path) catch return keg_path;
+
+        return keg_path;
     }
 
     /// Compute file mode from tar header mode (owner executable -> all executable).
@@ -777,5 +885,81 @@ test "pour handles files larger than buffer pool size" {
     const small = try tmp.dir.readFileAlloc(allocator, "cellar/bigpkg/2.0.0/bin/tool", 1024);
     defer allocator.free(small);
     try std.testing.expectEqualStrings("small file", small);
+}
+
+test "pourWithCache returns cached keg on second call" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create a bottle structure: {name}/{version}/bin/tool
+    try tmp.dir.makePath("cachepkg/1.0.0/bin");
+    try tmp.dir.writeFile(.{
+        .sub_path = "cachepkg/1.0.0/bin/tool",
+        .data = "#!/bin/sh\necho cachepkg\n",
+    });
+
+    // Get absolute path for the tmp dir.
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    // Create a tar.gz of the package directory.
+    const archive_name = "cachepkg-1.0.0.tar.gz";
+    const tar_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "tar", "czf", archive_name, "cachepkg" },
+        .cwd_dir = tmp.dir,
+    });
+    allocator.free(tar_result.stdout);
+    allocator.free(tar_result.stderr);
+
+    // Set up "cellar" and "keg_cache" directories.
+    try tmp.dir.makeDir("cellar");
+    try tmp.dir.makeDir("keg_cache");
+    var cellar_buf: [fs.max_path_bytes]u8 = undefined;
+    const cellar_path = try tmp.dir.realpath("cellar", &cellar_buf);
+    var cache_buf: [fs.max_path_bytes]u8 = undefined;
+    const keg_cache_path = try tmp.dir.realpath("keg_cache", &cache_buf);
+
+    // Build the archive absolute path.
+    const archive_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_path, archive_name });
+    defer allocator.free(archive_path);
+
+    const bottle = Bottle{
+        .allocator = allocator,
+        .cellar = cellar_path,
+        .prefix = "/opt/homebrew",
+    };
+
+    const fake_sha = "abc123deadbeef";
+
+    // --- First call: slow path (extract + populate cache) ---
+    const keg_path1 = try bottle.pourWithCache(archive_path, "cachepkg", "1.0.0", fake_sha, keg_cache_path);
+    defer allocator.free(keg_path1);
+
+    // Verify the keg was extracted in the cellar.
+    const extracted1 = try tmp.dir.readFileAlloc(allocator, "cellar/cachepkg/1.0.0/bin/tool", 1024 * 1024);
+    defer allocator.free(extracted1);
+    try std.testing.expectEqualStrings("#!/bin/sh\necho cachepkg\n", extracted1);
+
+    // Verify the cache was populated.
+    const cache_tool_path = try std.fmt.allocPrint(allocator, "keg_cache/{s}/cachepkg/1.0.0/bin/tool", .{fake_sha});
+    defer allocator.free(cache_tool_path);
+    const cached = try tmp.dir.readFileAlloc(allocator, cache_tool_path, 1024 * 1024);
+    defer allocator.free(cached);
+    try std.testing.expectEqualStrings("#!/bin/sh\necho cachepkg\n", cached);
+
+    // --- Delete the cellar keg to prove the second call uses the cache ---
+    try tmp.dir.deleteTree("cellar/cachepkg");
+
+    // --- Second call: fast path (clone from cache) ---
+    const keg_path2 = try bottle.pourWithCache(archive_path, "cachepkg", "1.0.0", fake_sha, keg_cache_path);
+    defer allocator.free(keg_path2);
+
+    // Verify the keg was restored from cache.
+    const extracted2 = try tmp.dir.readFileAlloc(allocator, "cellar/cachepkg/1.0.0/bin/tool", 1024 * 1024);
+    defer allocator.free(extracted2);
+    try std.testing.expectEqualStrings("#!/bin/sh\necho cachepkg\n", extracted2);
 }
 

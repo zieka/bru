@@ -243,15 +243,17 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
         // 3. Extract new bottle into cellar.
         out.print("Pouring {s} {s}...\n", .{ item.name, version });
-        var bottle = Bottle.init(allocator, config);
-        const keg_path = bottle.pour(archive_path, item.name, version) catch |err| {
+        var bottle_inst = Bottle.init(allocator, config);
+        const keg_cache_dir = std.fmt.allocPrint(allocator, "{s}/kegs", .{config.cache}) catch continue;
+        defer allocator.free(keg_cache_dir);
+        const keg_path = bottle_inst.pourWithCache(archive_path, item.name, version, bottle_sha256, keg_cache_dir) catch |err| {
             err_out.err("Extraction failed for {s}: {s}", .{ item.name, @errorName(err) });
             continue;
         };
         defer allocator.free(keg_path);
 
         // 4. Replace placeholders.
-        bottle.replacePlaceholders(keg_path) catch |err| {
+        bottle_inst.replacePlaceholders(keg_path) catch |err| {
             err_out.err("Placeholder replacement failed for {s}: {s}", .{ item.name, @errorName(err) });
         };
 
