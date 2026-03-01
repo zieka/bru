@@ -110,4 +110,5 @@ test {
     _ = @import("json_helpers.zig");
     _ = @import("fuzzy.zig");
     _ = @import("timer.zig");
+    _ = @import("clonefile.zig");
 }

@@ -155,8 +155,11 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     var bottle = Bottle.init(allocator, config);
 
+    const keg_cache_dir = try std.fmt.allocPrint(allocator, "{s}/kegs", .{config.cache});
+    defer allocator.free(keg_cache_dir);
+
     var extract_timer = Timer.start(&trace, "extract");
-    const keg_path = try bottle.pour(archive_path, name, version);
+    const keg_path = try bottle.pourWithCache(archive_path, name, version, bottle_sha256, keg_cache_dir);
     extract_timer.stop();
     defer allocator.free(keg_path);
 
