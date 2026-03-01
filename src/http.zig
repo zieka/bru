@@ -17,6 +17,38 @@ pub const HttpClient = struct {
         try self.fetchInner(url, dest_path, .{}, &.{});
     }
 
+    /// Fetch a URL and return the response body as an owned slice.
+    /// Downloads to a temporary file and reads it back into memory.
+    /// Caller owns the returned memory and must free it with the provided allocator.
+    pub fn fetchToMemory(self: *HttpClient, allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+        // Create a unique temp path using a hash of the URL.
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(url);
+        const digest = hasher.finalResult();
+        const hex = std.fmt.bytesToHex(digest, .lower);
+
+        const nonce = std.time.nanoTimestamp();
+        var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "/tmp/bru-fetch-{d}-{s}", .{ nonce, hex });
+
+        // Download to temp file.
+        try self.fetch(url, tmp_path);
+        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+        // Read into memory.
+        const file = try std.fs.cwd().openFile(tmp_path, .{});
+        defer file.close();
+
+        const stat = try file.stat();
+        const body = try allocator.alloc(u8, stat.size);
+        errdefer allocator.free(body);
+
+        const bytes_read = try file.readAll(body);
+        if (bytes_read != stat.size) return error.UnexpectedEof;
+
+        return body;
+    }
+
     /// Download from GHCR with anonymous auth header (Authorization: Bearer QQ==).
     pub fn fetchGhcr(self: *HttpClient, url: []const u8, dest_path: []const u8) !void {
         try self.fetchInner(url, dest_path, .{

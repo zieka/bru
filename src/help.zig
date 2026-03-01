@@ -8,7 +8,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\Usage: bru <command> [options] [arguments]
         \\
         \\Core commands:
-        \\  install    Install a formula
+        \\  install    Install a formula or cask
         \\  uninstall  Uninstall a formula
         \\  upgrade    Upgrade outdated formulae
         \\  update     Fetch latest formulae data
@@ -56,10 +56,13 @@ pub fn printCommandHelp(stdout: anytype, command: []const u8) !bool {
 fn getCommandHelp(command: []const u8) ?[]const u8 {
     const entries = .{
         .{ "install",
-            \\Usage: bru install <formula>
+            \\Usage: bru install [--cask] <formula|cask>
             \\
-            \\Install a formula from a pre-built bottle.
-            \\Automatically installs missing dependencies.
+            \\Install a formula or cask.
+            \\Automatically installs missing dependencies for formulae.
+            \\
+            \\Options:
+            \\  --cask  Install a cask (binary-only, CLI tools extracted)
             \\
         },
         .{ "uninstall",

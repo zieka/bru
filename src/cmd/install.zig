@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Config = @import("../config.zig").Config;
 const Index = @import("../index.zig").Index;
+const CaskIndex = @import("../cask_index.zig").CaskIndex;
 const Cellar = @import("../cellar.zig").Cellar;
 const download = @import("../download.zig");
 const Download = download.Download;
@@ -17,34 +18,50 @@ const Timer = timer_mod.Timer;
 const Trace = timer_mod.Trace;
 const HttpClient = @import("../http.zig").HttpClient;
 const batch_download = @import("../batch_download.zig");
+const cask_mod = @import("../cask.zig");
+const cask_install = @import("../cask_install.zig");
 
-/// Install a formula from a pre-built bottle.
+/// Install a formula or cask.
 ///
 /// Usage: bru install <formula>
+///        bru install --cask <cask>
 ///
-/// Looks up the formula in the binary index, downloads the bottle from GHCR,
-/// extracts it into the cellar, replaces placeholders, writes an install
-/// receipt, and links the keg into the prefix.
+/// For formulae: downloads the bottle from GHCR, extracts into cellar, links.
+/// For casks: downloads archive from vendor URL, extracts into caskroom,
+/// stages binary artifacts, and links binaries into prefix.
 pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
-    // 1. Parse args — find first non-flag argument as formula name.
-    var formula_name: ?[]const u8 = null;
+    // 1. Parse args — find first non-flag argument and check for --cask flag.
+    var pkg_name: ?[]const u8 = null;
+    var is_cask = false;
     for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
+            is_cask = true;
+            continue;
+        }
         if (arg.len > 0 and arg[0] == '-') continue;
-        formula_name = arg;
-        break;
+        if (pkg_name == null) pkg_name = arg;
     }
 
-    const name = formula_name orelse {
+    const name = pkg_name orelse {
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
         const stderr = &ew.interface;
-        try stderr.print("Usage: bru install <formula>\n", .{});
+        if (is_cask) {
+            try stderr.print("Usage: bru install --cask <cask>\n", .{});
+        } else {
+            try stderr.print("Usage: bru install <formula>\n", .{});
+        }
         try stderr.flush();
         std.process.exit(1);
     };
 
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
+
+    // Handle --cask installs.
+    if (is_cask) {
+        return installCaskCmd(allocator, name, config, out, err_out);
+    }
 
     // Initialize trace for timing/profiling.
     var trace = Trace.init(allocator, config.timing);
@@ -67,6 +84,17 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     const entry = idx.lookup(name) orelse {
         err_out.err("No available formula with the name \"{s}\".", .{name});
+
+        // Check if this is a cask and suggest --cask flag.
+        const cask_idx = CaskIndex.loadOrBuild(allocator, config.cache) catch null;
+        if (cask_idx) |ci| {
+            var cask_index = ci;
+            if (cask_index.lookup(name) != null) {
+                err_out.print("Did you mean the cask \"{s}\"? Try: bru install --cask {s}\n", .{ name, name });
+                std.process.exit(1);
+            }
+        }
+
         const similar = fuzzy.findSimilar(&idx, allocator, name, 3, 3) catch &.{};
         defer if (similar.len > 0) allocator.free(similar);
         if (similar.len > 0) {
@@ -251,6 +279,49 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ name, version });
     defer allocator.free(done_title);
     out.section(done_title);
+}
+
+/// Install a cask by token: fetch metadata, download, extract, stage binaries, link.
+fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: Output, err_out: Output) anyerror!void {
+    // Quick existence check using the cask index.
+    var cask_idx = try CaskIndex.loadOrBuild(allocator, config.cache);
+    const cask_entry = cask_idx.lookup(name) orelse {
+        err_out.err("No available cask with the name \"{s}\".", .{name});
+        std.process.exit(1);
+    };
+
+    // Check deprecated/disabled status.
+    const cask_disabled = (cask_entry.flags & 2) != 0;
+    const cask_deprecated = (cask_entry.flags & 1) != 0;
+    if (cask_disabled) {
+        err_out.err("Cask \"{s}\" is disabled.", .{name});
+        std.process.exit(1);
+    }
+    if (cask_deprecated) {
+        out.warn("Cask \"{s}\" is deprecated.", .{name});
+    }
+
+    // Fetch full per-cask metadata from API.
+    var http_client = HttpClient.init(allocator);
+    defer http_client.deinit();
+
+    out.print("Fetching cask metadata for {s}...\n", .{name});
+    const resolved = cask_mod.fetchAndResolveCask(allocator, &http_client, name) catch |fetch_err| {
+        err_out.err("Failed to fetch cask metadata for \"{s}\": {s}", .{ name, @errorName(fetch_err) });
+        return fetch_err;
+    };
+    defer cask_mod.freeResolvedCask(allocator, resolved);
+
+    // Check if this cask has any binary artifacts.
+    if (resolved.binaries.len == 0) {
+        err_out.warn("No CLI binaries for cask \"{s}\".", .{name});
+        err_out.print("This cask provides only a GUI application.\n", .{});
+        err_out.print("Use: brew install --cask {s}\n", .{name});
+        return;
+    }
+
+    // Run the cask install pipeline.
+    try cask_install.installCask(allocator, config, &http_client, resolved);
 }
 
 // ---------------------------------------------------------------------------

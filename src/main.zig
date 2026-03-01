@@ -116,6 +116,7 @@ test {
     _ = @import("index.zig");
     _ = @import("cask.zig");
     _ = @import("cask_index.zig");
+    _ = @import("cask_install.zig");
     _ = @import("version.zig");
     _ = @import("http.zig");
     _ = @import("batch_download.zig");
