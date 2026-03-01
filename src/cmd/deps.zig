@@ -66,6 +66,7 @@ pub fn depsCmd(allocator: Allocator, args: []const []const u8, config: Config) a
     const entry = idx.lookup(formula_name.?) orelse {
         const err_out = Output.initErr(config.no_color);
         err_out.err("No available formula with the name \"{s}\".", .{formula_name.?});
+        err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
         const similar = fuzzy.findSimilar(&idx, allocator, formula_name.?, 3, 3) catch &.{};
         defer if (similar.len > 0) allocator.free(similar);
         if (similar.len > 0) {
