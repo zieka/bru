@@ -84,6 +84,12 @@ pub const Cellar = struct {
             if (entry.kind != .directory and entry.kind != .unknown) continue;
             if (entry.name.len > 0 and entry.name[0] == '.') continue;
 
+            // On macOS/APFS, symlinks to directories may be reported as .directory
+            // rather than .sym_link. Attempt readLink to detect and skip symlinks
+            // (e.g. cask aliases like gcloud-cli -> google-cloud-sdk).
+            var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (dir.readLink(entry.name, &link_buf)) |_| continue else |_| {}
+
             const name = allocator.dupe(u8, entry.name) catch continue;
             const versions = self.installedVersions(allocator, name) orelse {
                 allocator.free(name);
