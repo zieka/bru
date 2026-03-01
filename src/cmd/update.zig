@@ -57,7 +57,8 @@ pub fn updateCmd(allocator: Allocator, args: []const []const u8, config: Config)
     };
 
     // Rebuild the index from the fresh JWS data.
-    _ = try Index.loadOrBuild(allocator, config.cache);
+    var idx = try Index.loadOrBuild(allocator, config.cache);
+    idx.deinit();
 
     // Also download cask data
     out.print("Downloading cask data...\n", .{});
@@ -83,7 +84,8 @@ pub fn updateCmd(allocator: Allocator, args: []const []const u8, config: Config)
     };
 
     // Rebuild cask index (best effort)
-    _ = CaskIndex.loadOrBuild(allocator, config.cache) catch {};
+    var cask_idx = CaskIndex.loadOrBuild(allocator, config.cache) catch null;
+    if (cask_idx) |*ci| ci.deinit();
 
     out.section("Updated successfully");
 }
