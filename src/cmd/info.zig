@@ -59,6 +59,7 @@ pub fn infoCmd(allocator: Allocator, args: []const []const u8, config: Config) a
 
         const err_out = Output.initErr(config.no_color);
         err_out.err("No available formula or cask with the name \"{s}\".", .{the_name});
+        err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
         const similar = fuzzy.findSimilar(&idx, allocator, the_name, 3, 3) catch &.{};
         defer if (similar.len > 0) allocator.free(similar);
         if (similar.len > 0) {

@@ -84,6 +84,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     const entry = idx.lookup(name) orelse {
         err_out.err("No available formula with the name \"{s}\".", .{name});
+        err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
 
         // Check if this is a cask and suggest --cask flag.
         const cask_idx = CaskIndex.loadOrBuild(allocator, config.cache) catch null;
@@ -287,6 +288,7 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
     var cask_idx = try CaskIndex.loadOrBuild(allocator, config.cache);
     const cask_entry = cask_idx.lookup(name) orelse {
         err_out.err("No available cask with the name \"{s}\".", .{name});
+        err_out.print("Searched: {s}/api/cask.jws.json\n", .{config.cache});
         std.process.exit(1);
     };
 

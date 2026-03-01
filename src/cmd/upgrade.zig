@@ -71,6 +71,7 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
         const entry = index.lookup(name) orelse {
             err_out.err("No available formula with the name \"{s}\".", .{name});
+            err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
             std.process.exit(1);
         };
 
