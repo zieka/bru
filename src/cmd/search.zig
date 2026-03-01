@@ -57,6 +57,17 @@ pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config)
         }
     }
 
+    // Subsequence matches.
+    for (0..count) |i| {
+        const entry = idx.getEntryByIndex(@intCast(i));
+        const name = idx.getString(entry.name_offset);
+        if (seen.contains(name)) continue;
+        if (fuzzy.isSubsequence(search_query, name)) {
+            try formula_matches.append(allocator, name);
+            try seen.put(name, {});
+        }
+    }
+
     // Fuzzy matches (edit distance 1) for queries <= 8 chars.
     if (search_query.len <= 8) {
         for (0..count) |i| {
@@ -87,6 +98,16 @@ pub fn searchCmd(allocator: Allocator, args: []const []const u8, config: Config)
             const centry = cask_idx.getEntryByIndex(@intCast(ci));
             const cask_name = cask_idx.getString(centry.token_offset);
             if (std.mem.indexOf(u8, cask_name, search_query) != null) {
+                try cask_matches.append(allocator, cask_name);
+                try cask_seen.put(cask_name, {});
+            }
+        }
+
+        for (0..cask_count) |ci| {
+            const centry = cask_idx.getEntryByIndex(@intCast(ci));
+            const cask_name = cask_idx.getString(centry.token_offset);
+            if (cask_seen.contains(cask_name)) continue;
+            if (fuzzy.isSubsequence(search_query, cask_name)) {
                 try cask_matches.append(allocator, cask_name);
                 try cask_seen.put(cask_name, {});
             }
@@ -149,19 +170,11 @@ fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Write non-JSON search results to the given writer using brew-style section
-/// headers when both formulae and cask matches are present.
+/// Write non-JSON search results to the given writer as a flat list (no
+/// section headers), matching brew's output format.
 fn writeSearchResults(writer: anytype, formula_matches: []const []const u8, cask_matches: []const []const u8) !void {
-    const both = formula_matches.len > 0 and cask_matches.len > 0;
-
-    if (both) {
-        try writer.writeAll("==> Formulae\n");
-    }
     for (formula_matches) |name| {
         try writer.print("{s}\n", .{name});
-    }
-    if (both) {
-        try writer.writeAll("\n==> Casks\n");
     }
     for (cask_matches) |name| {
         try writer.print("{s}\n", .{name});
@@ -176,19 +189,16 @@ test "searchCmd compiles and has correct signature" {
     // Smoke test: verifies the function signature is correct and the module compiles.
 }
 
-test "search output: mixed results show section headers" {
+test "search output: mixed results have no section headers" {
     var buf: [4096]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const writer = fbs.writer();
 
-    try writeSearchResults(writer, &.{ "firefoxpwa" }, &.{ "firefox", "firefox@beta" });
+    try writeSearchResults(writer, &.{"firefoxpwa"}, &.{ "firefox", "firefox@beta" });
 
     const output = fbs.getWritten();
     const expected =
-        \\==> Formulae
         \\firefoxpwa
-        \\
-        \\==> Casks
         \\firefox
         \\firefox@beta
         \\

@@ -46,6 +46,19 @@ fn candidateLessThan(_: void, a: Candidate, b: Candidate) bool {
     return std.mem.order(u8, a.name, b.name) == .lt;
 }
 
+/// Return true when every character in `query` appears in `name` in order
+/// (but not necessarily consecutively). For example, "bat" is a subsequence
+/// of "mongodb-atlas-cli" because the characters b-a-t appear in that order.
+pub fn isSubsequence(query: []const u8, name: []const u8) bool {
+    var qi: usize = 0;
+    for (name) |c| {
+        if (qi < query.len and c == query[qi]) {
+            qi += 1;
+        }
+    }
+    return qi == query.len;
+}
+
 /// Levenshtein edit distance. Returns 999 for very long strings to avoid allocations.
 pub fn editDistance(a: []const u8, b: []const u8) usize {
     if (a.len > 64 or b.len > 64) return 999;
@@ -78,6 +91,18 @@ pub fn editDistance(a: []const u8, b: []const u8) usize {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "isSubsequence basic cases" {
+    try std.testing.expect(isSubsequence("bat", "mongodb-atlas-cli"));
+    try std.testing.expect(isSubsequence("bat", "bat"));
+    try std.testing.expect(isSubsequence("bat", "bat-extras"));
+    try std.testing.expect(isSubsequence("bat", "combinator"));
+    try std.testing.expect(!isSubsequence("bat", "tab"));
+    try std.testing.expect(!isSubsequence("bat", "beta"));
+    try std.testing.expect(isSubsequence("", "anything"));
+    try std.testing.expect(!isSubsequence("abc", ""));
+    try std.testing.expect(isSubsequence("", ""));
+}
 
 test "editDistance basic cases" {
     try std.testing.expectEqual(@as(usize, 0), editDistance("bat", "bat"));
