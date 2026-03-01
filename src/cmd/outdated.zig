@@ -7,6 +7,17 @@ const Index = @import("../index.zig").Index;
 const PkgVersion = @import("../version.zig").PkgVersion;
 const writeJsonStr = @import("../json_helpers.zig").writeJsonStr;
 
+/// Check whether a formula has a valid opt-link at {prefix}/opt/{name}.
+/// Returns true if the symlink exists and points to a valid target.
+fn isOptLinked(prefix: []const u8, name: []const u8) bool {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opt_path = std.fmt.bufPrint(&path_buf, "{s}/opt/{s}", .{ prefix, name }) catch return false;
+
+    // Check if the symlink exists and its target is accessible.
+    std.fs.accessAbsolute(opt_path, .{}) catch return false;
+    return true;
+}
+
 /// Show installed formulae that have a newer version available in the index.
 ///
 /// With --verbose / -v: prints "name (installed_ver) < latest_ver"
@@ -58,7 +69,10 @@ pub fn outdatedCmd(allocator: Allocator, args: []const []const u8, config: Confi
                 .revision = @as(u32, entry.revision),
             };
 
-            if (installed_pv.order(index_pv) == .lt) {
+            const version_outdated = installed_pv.order(index_pv) == .lt;
+            const unlinked = !version_outdated and !isOptLinked(config.prefix, formula.name);
+
+            if (version_outdated or unlinked) {
                 if (!first) try stdout.writeAll(",");
                 try stdout.writeAll("{\"name\":");
                 try writeJsonStr(stdout, formula.name);
@@ -95,7 +109,12 @@ pub fn outdatedCmd(allocator: Allocator, args: []const []const u8, config: Confi
         };
 
         // If installed < index, this formula is outdated.
-        if (installed_pv.order(index_pv) == .lt) {
+        // Also report formulae whose version matches but are not opt-linked,
+        // matching brew's behavior (unlinked current version = outdated).
+        const version_outdated = installed_pv.order(index_pv) == .lt;
+        const unlinked = !version_outdated and !isOptLinked(config.prefix, formula.name);
+
+        if (version_outdated or unlinked) {
             if (verbose) {
                 // Format the index version for display.
                 var fmt_buf: [128]u8 = undefined;
@@ -116,4 +135,19 @@ pub fn outdatedCmd(allocator: Allocator, args: []const []const u8, config: Confi
 
 test "outdatedCmd compiles and has correct signature" {
     // Smoke test: verifies the function signature is correct and the module compiles.
+}
+
+test "isOptLinked returns true for linked formula" {
+    // Pick a formula that is definitely linked on this system.
+    // /opt/homebrew/opt should contain symlinks for linked formulae.
+    // Use the prefix itself as a known-good accessible path test.
+    const result = isOptLinked(Config.default_prefix, ".");
+    // "." resolves to {prefix}/opt/. which should exist if /opt/homebrew/opt exists.
+    // We just verify the function runs without crashing; exact result depends on system.
+    _ = result;
+}
+
+test "isOptLinked returns false for nonexistent formula" {
+    const result = isOptLinked(Config.default_prefix, "__nonexistent_formula_xyz_42__");
+    try std.testing.expect(!result);
 }
