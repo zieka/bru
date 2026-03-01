@@ -29,6 +29,83 @@ pub const Download = struct {
         return std.fmt.allocPrint(self.allocator, "{s}/blobs/{s}.tar.gz", .{ self.cache_dir, sha256 });
     }
 
+    /// Infer a file extension from a URL (e.g., ".dmg", ".zip", ".tar.gz").
+    pub fn urlExtension(url: []const u8) []const u8 {
+        // Strip query string and fragment.
+        const path = if (std.mem.indexOfScalar(u8, url, '?')) |q| url[0..q] else url;
+        const clean = if (std.mem.indexOfScalar(u8, path, '#')) |h| path[0..h] else path;
+
+        if (std.mem.endsWith(u8, clean, ".tar.gz")) return ".tar.gz";
+        if (std.mem.endsWith(u8, clean, ".tar.bz2")) return ".tar.bz2";
+        if (std.mem.endsWith(u8, clean, ".tar.xz")) return ".tar.xz";
+
+        const basename = std.fs.path.basename(clean);
+        if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| {
+            return basename[dot..];
+        }
+        return "";
+    }
+
+    /// Return the blob store path for a content-addressed cask archive.
+    /// Unlike bottles (always .tar.gz), cask archives preserve the original extension.
+    /// Format: {cache_dir}/blobs/{sha256}{ext}
+    pub fn caskBlobPath(self: Download, sha256: []const u8, url: []const u8) ![]const u8 {
+        const ext = urlExtension(url);
+        return std.fmt.allocPrint(self.allocator, "{s}/blobs/{s}{s}", .{ self.cache_dir, sha256, ext });
+    }
+
+    /// Download a cask archive, using cache if available and checksum matches.
+    /// Uses plain HTTP (not GHCR auth). Returns the blob path (caller owns the string).
+    /// If sha256 is "no_check", skips checksum verification.
+    pub fn fetchCask(self: Download, url: []const u8, expected_sha256: []const u8) ![]const u8 {
+        const no_check = std.mem.eql(u8, expected_sha256, "no_check");
+
+        // For no_check casks, use a hash of the URL as the blob name.
+        const blob = if (no_check) blk: {
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(url);
+            const digest = hasher.finalResult();
+            const hex = std.fmt.bytesToHex(digest, .lower);
+            const ext = urlExtension(url);
+            break :blk try std.fmt.allocPrint(self.allocator, "{s}/blobs/{s}{s}", .{ self.cache_dir, hex, ext });
+        } else try self.caskBlobPath(expected_sha256, url);
+        errdefer self.allocator.free(blob);
+
+        // Check blob store first.
+        if (!no_check) {
+            if (verifySha256(blob, expected_sha256) catch false) {
+                return blob;
+            }
+        } else {
+            // For no_check, just see if the file exists.
+            if (std.fs.cwd().access(blob, .{})) |_| {
+                return blob;
+            } else |_| {}
+        }
+
+        // Ensure the blobs directory exists.
+        const blobs_dir = try std.fmt.allocPrint(self.allocator, "{s}/blobs", .{self.cache_dir});
+        defer self.allocator.free(blobs_dir);
+        std.fs.cwd().makePath(blobs_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        // Download via plain HTTP (no GHCR auth needed for casks).
+        try self.http_client.fetch(url, blob);
+
+        // Verify checksum after download.
+        if (!no_check) {
+            const valid = try verifySha256(blob, expected_sha256);
+            if (!valid) {
+                std.fs.cwd().deleteFile(blob) catch {};
+                return error.ChecksumMismatch;
+            }
+        }
+
+        return blob;
+    }
+
     /// Download a bottle, using cache if available and checksum matches.
     /// Returns the blob path (caller owns the string).
     pub fn fetchBottle(self: Download, url: []const u8, name: []const u8, expected_sha256: []const u8) ![]const u8 {
@@ -243,4 +320,33 @@ test "ghcrImageName replaces both @ and +" {
     const result = try ghcrImageName(allocator, "lib+tool@2");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("libxtool/2", result);
+}
+
+test "urlExtension detects common extensions" {
+    try std.testing.expectEqualStrings(".dmg", Download.urlExtension("https://example.com/app.dmg"));
+    try std.testing.expectEqualStrings(".zip", Download.urlExtension("https://example.com/app.zip"));
+    try std.testing.expectEqualStrings(".pkg", Download.urlExtension("https://example.com/app.pkg"));
+    try std.testing.expectEqualStrings(".tar.gz", Download.urlExtension("https://example.com/app.tar.gz"));
+    try std.testing.expectEqualStrings(".tar.bz2", Download.urlExtension("https://example.com/app.tar.bz2"));
+}
+
+test "urlExtension strips query string" {
+    try std.testing.expectEqualStrings(".dmg", Download.urlExtension("https://example.com/app.dmg?key=val"));
+}
+
+test "urlExtension returns empty for no extension" {
+    try std.testing.expectEqualStrings("", Download.urlExtension("https://example.com/download"));
+}
+
+test "caskBlobPath preserves extension" {
+    const allocator = std.testing.allocator;
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    const dl = Download.init(allocator, "/tmp/bru-test-cache", &client);
+
+    const sha = "abc123def456abc123def456abc123def456abc123def456abc123def456abcd";
+    const path = try dl.caskBlobPath(sha, "https://example.com/app.dmg");
+    defer allocator.free(path);
+
+    try std.testing.expectEqualStrings("/tmp/bru-test-cache/blobs/abc123def456abc123def456abc123def456abc123def456abc123def456abcd.dmg", path);
 }
