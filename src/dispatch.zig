@@ -17,6 +17,7 @@ const cleanup = @import("cmd/cleanup.zig");
 const autoremove = @import("cmd/autoremove.zig");
 const update = @import("cmd/update.zig");
 const uses = @import("cmd/uses.zig");
+const shellenv = @import("cmd/shellenv.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -46,6 +47,9 @@ const native_commands = [_]CommandEntry{
     .{ .name = "__prefix", .handler = prefix.prefixCmd },
     .{ .name = "__cellar", .handler = prefix.cellarCmd },
     .{ .name = "__cache", .handler = prefix.cacheCmd },
+    .{ .name = "__caskroom", .handler = prefix.caskroomCmd },
+    .{ .name = "__repo", .handler = prefix.repoCmd },
+    .{ .name = "shellenv", .handler = shellenv.shellenvCmd },
     .{ .name = "list", .handler = list.listCmd },
     .{ .name = "search", .handler = search.searchCmd },
     .{ .name = "info", .handler = info.infoCmd },

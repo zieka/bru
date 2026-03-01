@@ -44,6 +44,42 @@ pub fn cacheCmd(_: std.mem.Allocator, _: []const []const u8, config: Config) any
     try stdout.flush();
 }
 
+/// Print the Homebrew caskroom path.
+/// Always prints "{caskroom}\n" (no argument variant).
+pub fn caskroomCmd(_: std.mem.Allocator, _: []const []const u8, config: Config) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    const stdout = &w.interface;
+
+    try stdout.print("{s}\n", .{config.caskroom});
+    try stdout.flush();
+}
+
+/// Print the Homebrew repository path.
+/// With an argument like "user/repo": prints "{repository}/Library/Taps/{user}/homebrew-{repo}\n"
+/// Without arguments: prints "{repository}\n"
+pub fn repoCmd(allocator: std.mem.Allocator, args: []const []const u8, config: Config) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    const stdout = &w.interface;
+
+    if (args.len > 0) {
+        const tap = args[0];
+        if (std.mem.indexOfScalar(u8, tap, '/')) |slash_pos| {
+            const user = tap[0..slash_pos];
+            const repo = tap[slash_pos + 1 ..];
+            const tap_path = try std.fmt.allocPrint(allocator, "{s}/Library/Taps/{s}/homebrew-{s}", .{ config.repository, user, repo });
+            defer allocator.free(tap_path);
+            try stdout.print("{s}\n", .{tap_path});
+        } else {
+            try stdout.print("{s}\n", .{config.repository});
+        }
+    } else {
+        try stdout.print("{s}\n", .{config.repository});
+    }
+    try stdout.flush();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -59,4 +95,12 @@ test "cellarCmd prints cellar without args" {
 
 test "cacheCmd prints cache" {
     // Smoke test for cacheCmd function signature.
+}
+
+test "caskroomCmd prints caskroom" {
+    // Smoke test for caskroomCmd function signature.
+}
+
+test "repoCmd prints repository" {
+    // Smoke test for repoCmd function signature.
 }

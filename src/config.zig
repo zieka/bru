@@ -6,6 +6,7 @@ pub const Config = struct {
     prefix: []const u8,
     cellar: []const u8,
     caskroom: []const u8,
+    repository: []const u8,
     cache: []const u8,
     brew_file: ?[]const u8,
     no_color: bool,
@@ -51,6 +52,8 @@ pub const Config = struct {
         const caskroom = getEnv("HOMEBREW_CASKROOM") orelse
             try std.fmt.allocPrint(allocator, "{s}/Caskroom", .{prefix});
 
+        const repository = getEnv("HOMEBREW_REPOSITORY") orelse prefix;
+
         const cache = blk: {
             if (getEnv("HOMEBREW_CACHE")) |c| break :blk c;
             const home = getEnv("HOME") orelse "/tmp";
@@ -61,6 +64,7 @@ pub const Config = struct {
             .prefix = prefix,
             .cellar = cellar,
             .caskroom = caskroom,
+            .repository = repository,
             .cache = cache,
             .brew_file = getEnv("HOMEBREW_BREW_FILE"),
             .no_color = envBool("HOMEBREW_NO_COLOR") or envBool("NO_COLOR"),

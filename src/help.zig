@@ -32,6 +32,9 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  fetch      Download a formula without installing
         \\  config     Show Homebrew configuration
         \\
+        \\Environment commands:
+        \\  shellenv   Print export statements for shell integration
+        \\
         \\Global options:
         \\  --help, -h       Show this help
         \\  --version        Show version
@@ -202,6 +205,13 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Usage: bru config
             \\
             \\Show Homebrew and bru configuration.
+            \\
+        },
+        .{ "shellenv",
+            \\Usage: bru shellenv
+            \\
+            \\Print export statements for Homebrew shell integration.
+            \\Add to your shell profile: eval "$(bru shellenv)"
             \\
         },
     };
