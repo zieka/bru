@@ -85,7 +85,7 @@ pub fn listCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         }
         allocator.free(casks);
     }
-    if (!only_formulae) {
+    if (!only_formulae and !(show_versions and !only_casks)) {
         const cr = Cellar.init(config.caskroom);
         casks = cr.installedFormulae(allocator);
     }
