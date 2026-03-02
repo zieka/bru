@@ -33,6 +33,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\
         \\Package management commands:
         \\  pin        Prevent a formula from being upgraded
+        \\  tap        Manage third-party formula repositories
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
@@ -293,6 +294,19 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Options:
             \\  --include-aliases  Include command aliases in output
             \\  --quiet, -q        List command names only (no section headers)
+            \\
+        },
+        .{ "tap",
+            \\Usage: bru tap [options] [user/repo] [URL]
+            \\
+            \\List or add third-party formula repositories (taps).
+            \\
+            \\With no arguments, list all installed taps.
+            \\With user/repo, clone the tap into Homebrew's Library/Taps.
+            \\
+            \\Options:
+            \\  --shallow  Perform a shallow clone (--depth=1)
+            \\  --force    Force re-clone of an existing tap
             \\
         },
     };
