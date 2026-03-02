@@ -19,6 +19,7 @@ const update = @import("cmd/update.zig");
 const uses = @import("cmd/uses.zig");
 const shellenv = @import("cmd/shellenv.zig");
 const log = @import("cmd/log.zig");
+const casks = @import("cmd/casks.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -69,6 +70,7 @@ const native_commands = [_]CommandEntry{
     .{ .name = "update", .handler = update.updateCmd },
     .{ .name = "uses", .handler = uses.usesCmd },
     .{ .name = "log", .handler = log.logCmd },
+    .{ .name = "casks", .handler = casks.casksCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.

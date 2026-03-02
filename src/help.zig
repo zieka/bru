@@ -26,6 +26,9 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  link       Symlink a formula into the prefix
         \\  unlink     Remove symlinks from the prefix
         \\
+        \\Discovery commands:
+        \\  casks      List all available cask names
+        \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
         \\  outdated   Show outdated formulae
@@ -224,6 +227,15 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --cask           Treat argument as a cask
             \\
         },
+        .{ "casks",
+            \\Usage: bru casks [--json]
+            \\
+            \\List all available cask names from the Homebrew API.
+            \\
+            \\Options:
+            \\  --json  Output as JSON array
+            \\
+        },
         .{ "shellenv",
             \\Usage: bru shellenv
             \\
@@ -254,7 +266,7 @@ test "getCommandHelp returns null for unknown commands" {
 }
 
 test "help text documents --json flag for supported commands" {
-    const json_commands = .{ "search", "info", "list", "deps", "leaves", "outdated" };
+    const json_commands = .{ "search", "info", "list", "deps", "leaves", "outdated", "casks" };
     inline for (json_commands) |cmd| {
         const help = getCommandHelp(cmd) orelse unreachable;
         try std.testing.expect(std.mem.indexOf(u8, help, "--json") != null);
