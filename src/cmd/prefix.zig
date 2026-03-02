@@ -45,8 +45,14 @@ pub fn cacheCmd(_: std.mem.Allocator, _: []const []const u8, config: Config) any
 }
 
 /// Print the Homebrew caskroom path.
+/// Creates the directory if it doesn't exist (matching brew behavior).
 /// Always prints "{caskroom}\n" (no argument variant).
 pub fn caskroomCmd(_: std.mem.Allocator, _: []const []const u8, config: Config) anyerror!void {
+    std.fs.makeDirAbsolute(config.caskroom) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
     var buf: [4096]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
     const stdout = &w.interface;
