@@ -27,6 +27,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  unlink     Remove symlinks from the prefix
         \\
         \\Discovery commands:
+        \\  desc       Show description for a formula or cask
         \\  home       Open homepage of a formula or cask
         \\  casks      List all available cask names
         \\
@@ -251,6 +252,20 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --json  Output as JSON array
             \\
         },
+        .{ "desc",
+            \\Usage: bru desc [options] <formula|cask> [...]
+            \\       bru desc --search <text>
+            \\
+            \\Display a formula or cask's name and one-line description.
+            \\
+            \\Options:
+            \\  -s, --search       Search both names and descriptions for text
+            \\  -n, --name         Search just names for text
+            \\  -d, --description  Search just descriptions for text
+            \\  --formula          Treat arguments as formulae
+            \\  --cask             Treat arguments as casks
+            \\
+        },
         .{ "shellenv",
             \\Usage: bru shellenv
             \\
@@ -284,6 +299,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("install") != null);
     try std.testing.expect(getCommandHelp("deps") != null);
     try std.testing.expect(getCommandHelp("uses") != null);
+    try std.testing.expect(getCommandHelp("desc") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
