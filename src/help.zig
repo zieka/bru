@@ -270,9 +270,11 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "shellenv",
-            \\Usage: bru shellenv
+            \\Usage: bru shellenv [bash|csh|fish|zsh]
             \\
             \\Print export statements for Homebrew shell integration.
+            \\Detects the current shell from $SHELL if no argument is given.
+            \\
             \\Add to your shell profile: eval "$(bru shellenv)"
             \\
         },
