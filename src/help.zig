@@ -31,6 +31,9 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  home       Open homepage of a formula or cask
         \\  casks      List all available cask names
         \\
+        \\Package management commands:
+        \\  pin        Prevent a formula from being upgraded
+        \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
         \\  outdated   Show outdated formulae
@@ -273,6 +276,13 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Add to your shell profile: eval "$(bru shellenv)"
             \\
         },
+        .{ "pin",
+            \\Usage: bru pin <formula>
+            \\
+            \\Prevent a formula from being upgraded when running bru upgrade.
+            \\No output on success.
+            \\
+        },
         .{ "commands",
             \\Usage: bru commands [--include-aliases] [--quiet]
             \\
@@ -300,6 +310,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("deps") != null);
     try std.testing.expect(getCommandHelp("uses") != null);
     try std.testing.expect(getCommandHelp("desc") != null);
+    try std.testing.expect(getCommandHelp("pin") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {

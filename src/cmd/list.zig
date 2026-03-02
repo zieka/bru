@@ -5,6 +5,7 @@ const cellar_mod = @import("../cellar.zig");
 const Cellar = cellar_mod.Cellar;
 const InstalledFormula = cellar_mod.InstalledFormula;
 const writeJsonStr = @import("../json_helpers.zig").writeJsonStr;
+const isPinned = @import("pin.zig").isPinned;
 
 /// List installed formulae and casks.
 ///
@@ -18,6 +19,7 @@ pub fn listCmd(allocator: Allocator, args: []const []const u8, config: Config) a
     var show_versions = false;
     var only_casks = false;
     var only_formulae = false;
+    var only_pinned = false;
     var json_output = false;
     var formula_name: ?[]const u8 = null;
 
@@ -28,11 +30,19 @@ pub fn listCmd(allocator: Allocator, args: []const []const u8, config: Config) a
             only_casks = true;
         } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
             only_formulae = true;
+        } else if (std.mem.eql(u8, arg, "--pinned")) {
+            only_pinned = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             formula_name = arg;
         }
+    }
+
+    // --pinned: list only pinned formulae by scanning the pinned directory.
+    if (only_pinned) {
+        try listPinned(config, show_versions, json_output);
+        return;
     }
 
     if (formula_name) |name| {
@@ -160,6 +170,73 @@ pub fn listCmd(allocator: Allocator, args: []const []const u8, config: Config) a
         }
     }
     try stdout.flush();
+}
+
+/// List pinned formulae by scanning {prefix}/var/homebrew/pinned/.
+fn listPinned(config: Config, show_versions: bool, json_output: bool) !void {
+    var pinned_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pinned_dir = std.fmt.bufPrint(&pinned_dir_buf, "{s}/var/homebrew/pinned", .{config.prefix}) catch return;
+
+    var dir = std.fs.openDirAbsolute(pinned_dir, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    // Collect names so we can sort them.
+    var names = std.ArrayList([]const u8){};
+    // Use a page_allocator for simplicity; process exits after command.
+    const alloc = std.heap.page_allocator;
+    defer {
+        for (names.items) |n| alloc.free(n);
+        names.deinit(alloc);
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name.len > 0 and entry.name[0] == '.') continue;
+        // Only include entries that are symlinks (valid pins).
+        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+        _ = dir.readLink(entry.name, &link_buf) catch continue;
+        const duped = alloc.dupe(u8, entry.name) catch continue;
+        names.append(alloc, duped) catch {
+            alloc.free(duped);
+            continue;
+        };
+    }
+
+    std.mem.sort([]const u8, names.items, {}, stringLessThan);
+
+    var buf: [4096]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&buf);
+    const stdout = &w.interface;
+
+    if (json_output) {
+        try stdout.writeAll("[");
+        for (names.items, 0..) |name, i| {
+            if (i > 0) try stdout.writeAll(",");
+            try writeJsonStr(stdout, name);
+        }
+        try stdout.writeAll("]\n");
+        try stdout.flush();
+        return;
+    }
+
+    const cellar = Cellar.init(config.cellar);
+    for (names.items) |name| {
+        if (show_versions) {
+            try stdout.print("{s}", .{name});
+            if (cellar.installedVersions(alloc, name)) |versions| {
+                for (versions) |v| try stdout.print(" {s}", .{v});
+                alloc.free(versions);
+            }
+            try stdout.print("\n", .{});
+        } else {
+            try stdout.print("{s}\n", .{name});
+        }
+    }
+    try stdout.flush();
+}
+
+fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
 
 /// Open the keg directory for {cellar}/{name}/{version} and print each entry.

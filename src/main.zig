@@ -112,6 +112,7 @@ test {
     _ = @import("cmd/home.zig");
     _ = @import("cmd/commands.zig");
     _ = @import("cmd/desc.zig");
+    _ = @import("cmd/pin.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");
