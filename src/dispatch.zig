@@ -18,6 +18,7 @@ const autoremove = @import("cmd/autoremove.zig");
 const update = @import("cmd/update.zig");
 const uses = @import("cmd/uses.zig");
 const shellenv = @import("cmd/shellenv.zig");
+const log = @import("cmd/log.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -67,6 +68,7 @@ const native_commands = [_]CommandEntry{
     .{ .name = "autoremove", .handler = autoremove.autoremoveCmd },
     .{ .name = "update", .handler = update.updateCmd },
     .{ .name = "uses", .handler = uses.usesCmd },
+    .{ .name = "log", .handler = log.logCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.
