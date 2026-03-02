@@ -86,6 +86,10 @@ compare_exact "search bat" search bat
 compare_exact "desc git" desc git
 compare_exact "desc --formula git" desc --formula git
 compare_exact "deps bat" deps bat
+compare_exact "shellenv bash" shellenv bash
+compare_exact "shellenv zsh" shellenv zsh
+compare_exact "shellenv fish" shellenv fish
+compare_exact "shellenv csh" shellenv csh
 compare_loose "info bat" info bat
 compare "uses libgit2 --installed" uses libgit2 --installed
 
