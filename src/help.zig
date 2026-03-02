@@ -31,6 +31,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  outdated   Show outdated formulae
         \\  fetch      Download a formula without installing
         \\  config     Show Homebrew configuration
+        \\  log        Show the git log for a formula or cask
         \\
         \\Environment commands:
         \\  shellenv   Print export statements for shell integration
@@ -205,6 +206,22 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Usage: bru config
             \\
             \\Show Homebrew and bru configuration.
+            \\
+        },
+        .{ "log",
+            \\Usage: bru log [options] [formula|cask]
+            \\
+            \\Show the git log for a formula or cask, or show the log
+            \\for the Homebrew repository if no formula or cask is provided.
+            \\
+            \\Options:
+            \\  -p, --patch      Also print patch from commit
+            \\  --stat           Also print diffstat from commit
+            \\  --oneline        Print only one line per commit
+            \\  -1               Print only one commit
+            \\  -n, --max-count  Print only a specified number of commits
+            \\  --formula        Treat argument as a formula
+            \\  --cask           Treat argument as a cask
             \\
         },
         .{ "shellenv",
