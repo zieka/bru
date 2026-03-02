@@ -36,6 +36,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  fetch      Download a formula without installing
         \\  config     Show Homebrew configuration
         \\  log        Show the git log for a formula or cask
+        \\  commands   List available commands
         \\
         \\Environment commands:
         \\  shellenv   Print export statements for shell integration
@@ -255,6 +256,16 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
             \\Print export statements for Homebrew shell integration.
             \\Add to your shell profile: eval "$(bru shellenv)"
+            \\
+        },
+        .{ "commands",
+            \\Usage: bru commands [--include-aliases] [--quiet]
+            \\
+            \\List all available commands (built-in and external).
+            \\
+            \\Options:
+            \\  --include-aliases  Include command aliases in output
+            \\  --quiet, -q        List command names only (no section headers)
             \\
         },
     };

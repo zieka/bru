@@ -21,6 +21,7 @@ const shellenv = @import("cmd/shellenv.zig");
 const log = @import("cmd/log.zig");
 const casks = @import("cmd/casks.zig");
 const home = @import("cmd/home.zig");
+const commands = @import("cmd/commands.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -40,13 +41,13 @@ pub const ParsedArgs = struct {
 pub const CommandFn = *const fn (allocator: std.mem.Allocator, args: []const []const u8, config: Config) anyerror!void;
 
 /// Entry in the comptime native-commands dispatch table.
-const CommandEntry = struct {
+pub const CommandEntry = struct {
     name: []const u8,
     handler: CommandFn,
 };
 
 /// Native commands dispatch table.
-const native_commands = [_]CommandEntry{
+pub const native_commands = [_]CommandEntry{
     .{ .name = "__prefix", .handler = prefix.prefixCmd },
     .{ .name = "__cellar", .handler = prefix.cellarCmd },
     .{ .name = "__cache", .handler = prefix.cacheCmd },
@@ -73,6 +74,7 @@ const native_commands = [_]CommandEntry{
     .{ .name = "log", .handler = log.logCmd },
     .{ .name = "casks", .handler = casks.casksCmd },
     .{ .name = "home", .handler = home.homeCmd },
+    .{ .name = "commands", .handler = commands.commandsCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.
@@ -159,30 +161,31 @@ pub fn parseArgs(argv: []const []const u8) ParsedArgs {
     return result;
 }
 
+/// Alias entries mapping alias names to canonical command names.
+pub const alias_entries = .{
+    .{ "ls", "list" },
+    .{ "rm", "uninstall" },
+    .{ "remove", "uninstall" },
+    .{ "dr", "doctor" },
+    .{ "-S", "search" },
+    .{ "ln", "link" },
+    .{ "instal", "install" },
+    .{ "uninstal", "uninstall" },
+    .{ "--prefix", "__prefix" },
+    .{ "--cellar", "__cellar" },
+    .{ "--cache", "__cache" },
+    .{ "--caskroom", "__caskroom" },
+    .{ "--repo", "__repo" },
+    .{ "--repository", "__repo" },
+    .{ "homepage", "home" },
+    .{ "--config", "config" },
+    .{ "--env", "env" },
+};
+
 /// Resolve a command alias to its canonical command name.
 /// Returns the input unchanged if no alias matches.
 pub fn resolveAlias(name: []const u8) []const u8 {
-    const aliases = .{
-        .{ "ls", "list" },
-        .{ "rm", "uninstall" },
-        .{ "remove", "uninstall" },
-        .{ "dr", "doctor" },
-        .{ "-S", "search" },
-        .{ "ln", "link" },
-        .{ "instal", "install" },
-        .{ "uninstal", "uninstall" },
-        .{ "--prefix", "__prefix" },
-        .{ "--cellar", "__cellar" },
-        .{ "--cache", "__cache" },
-        .{ "--caskroom", "__caskroom" },
-        .{ "--repo", "__repo" },
-        .{ "--repository", "__repo" },
-        .{ "homepage", "home" },
-        .{ "--config", "config" },
-        .{ "--env", "env" },
-    };
-
-    inline for (aliases) |pair| {
+    inline for (alias_entries) |pair| {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
     }
     return name;

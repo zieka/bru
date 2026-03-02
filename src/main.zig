@@ -110,6 +110,7 @@ test {
     _ = @import("cmd/log.zig");
     _ = @import("cmd/casks.zig");
     _ = @import("cmd/home.zig");
+    _ = @import("cmd/commands.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");
