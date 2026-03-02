@@ -16,6 +16,7 @@ const RuntimeDep = tab_mod.RuntimeDep;
 const HttpClient = @import("../http.zig").HttpClient;
 const batch_download = @import("../batch_download.zig");
 const installCmd = @import("install.zig").installCmd;
+const isPinned = @import("pin.zig").isPinned;
 
 /// An outdated formula pending upgrade.
 const OutdatedFormula = struct {
@@ -116,6 +117,9 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
         }
 
         for (installed) |formula| {
+            // Skip pinned formulae when upgrading all.
+            if (isPinned(config.prefix, formula.name)) continue;
+
             const entry = index.lookup(formula.name) orelse continue;
 
             const installed_pv = PkgVersion.parse(formula.latestVersion());
