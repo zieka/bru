@@ -27,6 +27,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  unlink     Remove symlinks from the prefix
         \\
         \\Discovery commands:
+        \\  home       Open homepage of a formula or cask
         \\  casks      List all available cask names
         \\
         \\Maintenance commands:
@@ -225,6 +226,19 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  -n, --max-count  Print only a specified number of commits
             \\  --formula        Treat argument as a formula
             \\  --cask           Treat argument as a cask
+            \\
+        },
+        .{ "home",
+            \\Usage: bru home [formula|cask]
+            \\
+            \\Open the homepage of a formula or cask in the default browser.
+            \\With no arguments, opens Homebrew's homepage (https://brew.sh).
+            \\
+            \\Options:
+            \\  --formula  Treat argument as a formula
+            \\  --cask     Treat argument as a cask
+            \\
+            \\Alias: homepage
             \\
         },
         .{ "casks",
