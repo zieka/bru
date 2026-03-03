@@ -114,6 +114,7 @@ test {
     _ = @import("cmd/commands.zig");
     _ = @import("cmd/desc.zig");
     _ = @import("cmd/pin.zig");
+    _ = @import("cmd/unpin.zig");
     _ = @import("cmd/tap.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");

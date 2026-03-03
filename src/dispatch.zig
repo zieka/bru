@@ -24,6 +24,7 @@ const home = @import("cmd/home.zig");
 const commands = @import("cmd/commands.zig");
 const desc = @import("cmd/desc.zig");
 const pin = @import("cmd/pin.zig");
+const unpin = @import("cmd/unpin.zig");
 const tap = @import("cmd/tap.zig");
 const formulae = @import("cmd/formulae.zig");
 
@@ -81,6 +82,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "commands", .handler = commands.commandsCmd },
     .{ .name = "desc", .handler = desc.descCmd },
     .{ .name = "pin", .handler = pin.pinCmd },
+    .{ .name = "unpin", .handler = unpin.unpinCmd },
     .{ .name = "tap", .handler = tap.tapCmd },
     .{ .name = "formulae", .handler = formulae.formulaeCmd },
 };
