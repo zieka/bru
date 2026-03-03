@@ -26,6 +26,7 @@ const desc = @import("cmd/desc.zig");
 const pin = @import("cmd/pin.zig");
 const unpin = @import("cmd/unpin.zig");
 const tap = @import("cmd/tap.zig");
+const untap = @import("cmd/untap.zig");
 const formulae = @import("cmd/formulae.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
@@ -84,6 +85,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "pin", .handler = pin.pinCmd },
     .{ .name = "unpin", .handler = unpin.unpinCmd },
     .{ .name = "tap", .handler = tap.tapCmd },
+    .{ .name = "untap", .handler = untap.untapCmd },
     .{ .name = "formulae", .handler = formulae.formulaeCmd },
 };
 

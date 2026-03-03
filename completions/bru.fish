@@ -18,6 +18,8 @@ complete -c bru -n '__fish_use_subcommand' -a cleanup -d 'Remove old versions'
 complete -c bru -n '__fish_use_subcommand' -a outdated -d 'Show outdated'
 complete -c bru -n '__fish_use_subcommand' -a fetch -d 'Download only'
 complete -c bru -n '__fish_use_subcommand' -a config -d 'Show config'
+complete -c bru -n '__fish_use_subcommand' -a tap -d 'Manage taps'
+complete -c bru -n '__fish_use_subcommand' -a untap -d 'Remove a tap'
 
 # Global flags
 complete -c bru -n '__fish_use_subcommand' -l help -d 'Show help'
@@ -67,3 +69,10 @@ complete -c bru -n '__fish_seen_subcommand_from cleanup' -l prune -d 'Override d
 # autoremove flags
 complete -c bru -n '__fish_seen_subcommand_from autoremove' -l dry-run -d 'Show what would be removed'
 complete -c bru -n '__fish_seen_subcommand_from autoremove' -s n -d 'Show what would be removed'
+
+# tap flags
+complete -c bru -n '__fish_seen_subcommand_from tap' -l shallow -d 'Perform a shallow clone'
+complete -c bru -n '__fish_seen_subcommand_from tap' -l force -d 'Force re-clone of an existing tap'
+
+# untap flags
+complete -c bru -n '__fish_seen_subcommand_from untap' -l force -d 'Untap even if packages are installed'
