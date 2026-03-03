@@ -118,6 +118,7 @@ test {
     _ = @import("cmd/tap.zig");
     _ = @import("cmd/untap.zig");
     _ = @import("cmd/cat.zig");
+    _ = @import("cmd/analytics.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");

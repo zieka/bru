@@ -47,6 +47,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  log        Show the git log for a formula or cask
         \\  edit       Open a formula or cask source file in an editor
         \\  commands   List available commands
+        \\  analytics  Manage anonymous aggregate user analytics
         \\
         \\Environment commands:
         \\  shellenv   Print export statements for shell integration
@@ -362,6 +363,18 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --cask     Treat argument as a cask
             \\
         },
+        .{ "analytics",
+            \\Usage: bru analytics [subcommand]
+            \\
+            \\Manage Homebrew's anonymous aggregate user analytics.
+            \\
+            \\Subcommands:
+            \\  state              Show current analytics status (default)
+            \\  on                 Enable analytics
+            \\  off                Disable analytics
+            \\  regenerate-uuid    Deprecated (no longer necessary)
+            \\
+        },
     };
 
     inline for (entries) |pair| {
@@ -383,6 +396,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("unpin") != null);
     try std.testing.expect(getCommandHelp("edit") != null);
     try std.testing.expect(getCommandHelp("cat") != null);
+    try std.testing.expect(getCommandHelp("analytics") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
