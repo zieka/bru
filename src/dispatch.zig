@@ -29,7 +29,7 @@ const tap = @import("cmd/tap.zig");
 const untap = @import("cmd/untap.zig");
 const formulae = @import("cmd/formulae.zig");
 const edit = @import("cmd/edit.zig");
-const doctor = @import("cmd/doctor.zig");
+const cat = @import("cmd/cat.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -90,7 +90,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "untap", .handler = untap.untapCmd },
     .{ .name = "formulae", .handler = formulae.formulaeCmd },
     .{ .name = "edit", .handler = edit.editCmd },
-    .{ .name = "doctor", .handler = doctor.doctorCmd },
+    .{ .name = "cat", .handler = cat.catCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.
