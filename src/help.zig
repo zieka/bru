@@ -36,6 +36,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  pin        Prevent a formula from being upgraded
         \\  unpin      Allow a pinned formula to be upgraded again
         \\  tap        Manage third-party formula repositories
+        \\  untap      Remove a tapped formula repository
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
@@ -325,6 +326,15 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Options:
             \\  --shallow  Perform a shallow clone (--depth=1)
             \\  --force    Force re-clone of an existing tap
+            \\
+        },
+        .{ "untap",
+            \\Usage: bru untap [--force] <tap> [...]
+            \\
+            \\Remove a tapped formula repository.
+            \\
+            \\Options:
+            \\  --force, -f  Untap even if formulae or casks from this tap are currently installed
             \\
         },
     };

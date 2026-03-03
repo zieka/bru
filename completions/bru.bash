@@ -5,7 +5,7 @@ _bru() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     commands="install uninstall upgrade update search info list deps uses leaves
-              autoremove link unlink cleanup outdated fetch config"
+              autoremove link unlink cleanup outdated fetch config tap untap"
 
     # Position 1: complete commands or global flags
     if [[ ${COMP_CWORD} -eq 1 ]]; then
@@ -41,6 +41,8 @@ _bru() {
             link)       flags="--force" ;;
             cleanup)    flags="--dry-run -n --prune=" ;;
             autoremove) flags="--dry-run -n" ;;
+            tap)        flags="--shallow --force" ;;
+            untap)      flags="--force" ;;
         esac
         if [[ -n "${flags}" ]]; then
             COMPREPLY=( $(compgen -W "${flags}" -- "${cur}") )

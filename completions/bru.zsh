@@ -35,6 +35,8 @@ _bru() {
                 'outdated:Show outdated formulae'
                 'fetch:Download without installing'
                 'config:Show configuration'
+                'tap:Manage third-party taps'
+                'untap:Remove a tapped repository'
             )
             _describe 'command' commands
             _arguments $global_flags
@@ -98,6 +100,17 @@ _bru() {
                     _arguments \
                         '--dry-run[Show what would be removed]' \
                         '-n[Show what would be removed]'
+                    ;;
+                tap)
+                    _arguments \
+                        '--shallow[Perform a shallow clone]' \
+                        '--force[Force re-clone of an existing tap]' \
+                        '*:tap:_guard "^-*" tap'
+                    ;;
+                untap)
+                    _arguments \
+                        '--force[Untap even if packages are installed]' \
+                        '*:tap:_guard "^-*" tap'
                     ;;
                 install|uninstall|unlink|upgrade|fetch)
                     _arguments '*:formula:_guard "^-*" formula'
