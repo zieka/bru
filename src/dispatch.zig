@@ -25,6 +25,7 @@ const commands = @import("cmd/commands.zig");
 const desc = @import("cmd/desc.zig");
 const pin = @import("cmd/pin.zig");
 const tap = @import("cmd/tap.zig");
+const formulae = @import("cmd/formulae.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -81,6 +82,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "desc", .handler = desc.descCmd },
     .{ .name = "pin", .handler = pin.pinCmd },
     .{ .name = "tap", .handler = tap.tapCmd },
+    .{ .name = "formulae", .handler = formulae.formulaeCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.
@@ -184,6 +186,7 @@ pub const alias_entries = .{
     .{ "--repo", "__repo" },
     .{ "--repository", "__repo" },
     .{ "homepage", "home" },
+    .{ "formula", "formulae" },
     .{ "--config", "config" },
     .{ "--env", "env" },
 };

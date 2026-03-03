@@ -30,6 +30,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  desc       Show description for a formula or cask
         \\  home       Open homepage of a formula or cask
         \\  casks      List all available cask names
+        \\  formulae   List all available formula names
         \\
         \\Package management commands:
         \\  pin        Prevent a formula from being upgraded
@@ -256,6 +257,15 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --json  Output as JSON array
             \\
         },
+        .{ "formulae",
+            \\Usage: bru formulae [--json]
+            \\
+            \\List all available formula names from the Homebrew API.
+            \\
+            \\Options:
+            \\  --json  Output as JSON array
+            \\
+        },
         .{ "desc",
             \\Usage: bru desc [options] <formula|cask> [...]
             \\       bru desc --search <text>
@@ -334,7 +344,7 @@ test "getCommandHelp returns null for unknown commands" {
 }
 
 test "help text documents --json flag for supported commands" {
-    const json_commands = .{ "search", "info", "list", "deps", "leaves", "outdated", "casks" };
+    const json_commands = .{ "search", "info", "list", "deps", "leaves", "outdated", "casks", "formulae" };
     inline for (json_commands) |cmd| {
         const help = getCommandHelp(cmd) orelse unreachable;
         try std.testing.expect(std.mem.indexOf(u8, help, "--json") != null);
