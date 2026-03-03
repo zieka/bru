@@ -38,6 +38,9 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  tap        Manage third-party formula repositories
         \\  untap      Remove a tapped formula repository
         \\
+        \\Diagnostic commands:
+        \\  doctor     Check your system for potential problems
+        \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
         \\  outdated   Show outdated formulae
@@ -327,6 +330,16 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Options:
             \\  --formula  Treat argument as a formula
             \\  --cask     Treat argument as a cask
+            \\
+        },
+        .{ "doctor",
+            \\Usage: bru doctor
+            \\
+            \\Check your system for potential problems.
+            \\Checks for broken symlinks, unlinked kegs, stale lock files,
+            \\junk files, directory permissions, and PATH configuration.
+            \\
+            \\Alias: dr
             \\
         },
         .{ "tap",
