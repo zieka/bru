@@ -38,6 +38,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  unpin      Allow a pinned formula to be upgraded again
         \\  tap        Manage third-party formula repositories
         \\  untap      Remove a tapped formula repository
+        \\  migrate    Migrate renamed or deprecated formulae
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
@@ -405,6 +406,20 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\    Remove completion scripts from shell completion directories.
             \\
         },
+        .{ "migrate",
+            \\Usage: bru migrate [options] <installed_formula> [...]
+            \\
+            \\Migrate renamed or deprecated formulae to their replacements.
+            \\Handles formula renames natively; falls back to brew for
+            \\deprecation replacements and tap migrations.
+            \\
+            \\Options:
+            \\  --force, -f    Treat installed and provided formula as if from same taps
+            \\  --dry-run, -n  Show what would be migrated without making changes
+            \\  --formula      Only migrate formulae
+            \\  --cask         Only migrate casks
+            \\
+        },
     };
 
     inline for (entries) |pair| {
@@ -429,6 +444,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("analytics") != null);
     try std.testing.expect(getCommandHelp("completions") != null);
     try std.testing.expect(getCommandHelp("env") != null);
+    try std.testing.expect(getCommandHelp("migrate") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
