@@ -33,6 +33,7 @@ const cat = @import("cmd/cat.zig");
 const analytics = @import("cmd/analytics.zig");
 const completions = @import("cmd/completions.zig");
 const env_cmd = @import("cmd/env.zig");
+const migrate = @import("cmd/migrate.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -97,6 +98,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "analytics", .handler = analytics.analyticsCmd },
     .{ .name = "completions", .handler = completions.completionsCmd },
     .{ .name = "env", .handler = env_cmd.envCmd },
+    .{ .name = "migrate", .handler = migrate.migrateCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.

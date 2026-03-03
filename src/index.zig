@@ -11,13 +11,14 @@ const FormulaInfo = formula_mod.FormulaInfo;
 
 pub const IndexHeader = extern struct {
     magic: [4]u8 = .{ 'B', 'R', 'U', 'I' },
-    version: u32 = 2,
+    version: u32 = 3,
     source_hash: [32]u8 = .{0} ** 32,
     entry_count: u32 = 0,
     _pad: [4]u8 = .{0} ** 4,
     hash_table_offset: u64 = 0,
     entries_offset: u64 = 0,
     strings_offset: u64 = 0,
+    oldname_hash_table_offset: u64 = 0,
 };
 
 pub const IndexEntry = extern struct {
@@ -36,6 +37,8 @@ pub const IndexEntry = extern struct {
     bottle_root_url_offset: u32 = 0,
     bottle_sha256_offset: u32 = 0,
     bottle_cellar_offset: u32 = 0,
+    oldnames_offset: u32 = 0,
+    replacement_offset: u32 = 0,
 };
 
 pub const HashBucket = extern struct {
@@ -145,6 +148,8 @@ pub const Index = struct {
                 .bottle_root_url_offset = try stb.addString(allocator, f.bottle_root_url),
                 .bottle_sha256_offset = try stb.addString(allocator, f.bottle_sha256),
                 .bottle_cellar_offset = try stb.addString(allocator, f.bottle_cellar),
+                .oldnames_offset = try stb.addStringList(allocator, f.oldnames),
+                .replacement_offset = try stb.addString(allocator, f.deprecation_replacement),
             };
         }
 
@@ -174,6 +179,36 @@ pub const Index = struct {
         }
 
         // ------------------------------------------------------------------
+        // 2b. Build oldnames hash table (oldname -> entry_index).
+        // ------------------------------------------------------------------
+        var total_oldnames: u32 = 0;
+        for (formulae) |f| {
+            total_oldnames += @intCast(f.oldnames.len);
+        }
+
+        const old_bucket_count: u32 = if (total_oldnames == 0) 2 else total_oldnames * 2;
+        const old_hash_table = try allocator.alloc(HashBucket, old_bucket_count);
+        defer allocator.free(old_hash_table);
+
+        for (old_hash_table) |*b| {
+            b.* = HashBucket{};
+        }
+
+        for (formulae, 0..) |f, i| {
+            for (f.oldnames) |oldname| {
+                const oh = fnvHash(oldname);
+                var oslot = oh % old_bucket_count;
+                while (old_hash_table[oslot].entry_index != std.math.maxInt(u32)) {
+                    oslot = (oslot + 1) % old_bucket_count;
+                }
+                old_hash_table[oslot] = HashBucket{
+                    .string_offset = try stb.addString(allocator, oldname),
+                    .entry_index = @intCast(i),
+                };
+            }
+        }
+
+        // ------------------------------------------------------------------
         // 3. Calculate layout sizes.
         // ------------------------------------------------------------------
         const header_size: u64 = @sizeOf(IndexHeader);
@@ -181,10 +216,13 @@ pub const Index = struct {
         const entries_size: u64 = @as(u64, @intCast(formulae.len)) * @sizeOf(IndexEntry);
         const strings_size: u64 = stb.data.items.len;
 
+        const old_hash_table_size: u64 = @as(u64, old_bucket_count) * @sizeOf(HashBucket);
+
         const hash_table_offset = header_size;
         const entries_offset = hash_table_offset + hash_table_size;
         const strings_offset = entries_offset + entries_size;
-        const total_size: usize = @intCast(strings_offset + strings_size);
+        const oldname_ht_offset = strings_offset + strings_size;
+        const total_size: usize = @intCast(oldname_ht_offset + old_hash_table_size);
 
         // ------------------------------------------------------------------
         // 4. Allocate buffer and copy everything in.
@@ -198,6 +236,7 @@ pub const Index = struct {
             .hash_table_offset = hash_table_offset,
             .entries_offset = entries_offset,
             .strings_offset = strings_offset,
+            .oldname_hash_table_offset = oldname_ht_offset,
         };
         const header_bytes = mem.asBytes(&header);
         @memcpy(buf[0..header_bytes.len], header_bytes);
@@ -212,6 +251,10 @@ pub const Index = struct {
 
         // String table
         @memcpy(buf[@intCast(strings_offset)..][0..stb.data.items.len], stb.data.items);
+
+        // Oldnames hash table
+        const oht_bytes = mem.sliceAsBytes(old_hash_table);
+        @memcpy(buf[@intCast(oldname_ht_offset)..][0..oht_bytes.len], oht_bytes);
 
         return Index{
             .data = buf,
@@ -301,6 +344,33 @@ pub const Index = struct {
         }
     }
 
+    /// Look up a formula by one of its old names. Returns the IndexEntry if found.
+    pub fn lookupByOldname(self: *const Index, oldname: []const u8) ?IndexEntry {
+        const header = self.getHeader();
+        if (header.oldname_hash_table_offset == 0) return null;
+
+        // Compute bucket count from the space between oldname_hash_table_offset and end of data.
+        const oht_size = self.data.len - @as(usize, @intCast(header.oldname_hash_table_offset));
+        const old_bucket_count: u32 = @intCast(oht_size / @sizeOf(HashBucket));
+        if (old_bucket_count == 0) return null;
+
+        const h = fnvHash(oldname);
+        var slot = h % old_bucket_count;
+
+        while (true) {
+            const bucket_off: usize = @intCast(header.oldname_hash_table_offset + @as(u64, slot) * @sizeOf(HashBucket));
+            const bucket = mem.bytesToValue(HashBucket, self.data[bucket_off..][0..@sizeOf(HashBucket)]);
+            if (bucket.entry_index == std.math.maxInt(u32)) {
+                return null;
+            }
+            const candidate = self.getString(bucket.string_offset);
+            if (mem.eql(u8, candidate, oldname)) {
+                return self.getEntryByIndex(bucket.entry_index);
+            }
+            slot = (slot + 1) % old_bucket_count;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Persistence
     // ------------------------------------------------------------------
@@ -351,7 +421,7 @@ pub const Index = struct {
 
         // Reject incompatible index versions (e.g. v1 without caveats/has_head).
         const ver = mem.readInt(u32, data[4..8], .little);
-        if (ver != 2) {
+        if (ver != 3) {
             posix.munmap(mapped);
             return null;
         }
@@ -450,6 +520,8 @@ test "build and lookup" {
         .caveats = "Some caveat text",
         .dependencies = &deps,
         .build_dependencies = &build_deps,
+        .oldnames = &.{},
+        .deprecation_replacement = "",
         .bottle_root_url = "https://ghcr.io/v2/homebrew/core",
         .bottle_sha256 = "abc123",
         .bottle_cellar = ":any",
@@ -526,6 +598,8 @@ test "lookup missing returns null" {
         .caveats = "",
         .dependencies = &.{},
         .build_dependencies = &.{},
+        .oldnames = &.{},
+        .deprecation_replacement = "",
         .bottle_root_url = "",
         .bottle_sha256 = "",
         .bottle_cellar = "",
@@ -608,4 +682,50 @@ test "loadOrBuild from real cache" {
     // Lookup "bat".
     const entry = idx.lookup("bat") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("bat", idx.getString(entry.name_offset));
+}
+
+test "lookupByOldname finds renamed formula" {
+    const allocator = std.testing.allocator;
+
+    const old = [_][]const u8{"gnome-icon-theme"};
+    const formula = FormulaInfo{
+        .name = "adwaita-icon-theme",
+        .full_name = "adwaita-icon-theme",
+        .desc = "Icons for GNOME",
+        .homepage = "",
+        .license = "",
+        .version = "46.0",
+        .revision = 0,
+        .tap = "homebrew/core",
+        .keg_only = false,
+        .deprecated = false,
+        .disabled = false,
+        .has_head = false,
+        .caveats = "",
+        .dependencies = &.{},
+        .build_dependencies = &.{},
+        .bottle_root_url = "",
+        .bottle_sha256 = "",
+        .bottle_cellar = "",
+        .oldnames = &old,
+        .deprecation_replacement = "",
+    };
+
+    const formulae = [_]FormulaInfo{formula};
+    var idx = try Index.build(allocator, &formulae);
+    defer idx.deinit();
+
+    // Lookup by old name should find the entry.
+    const entry = idx.lookupByOldname("gnome-icon-theme") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("adwaita-icon-theme", idx.getString(entry.name_offset));
+
+    // Lookup by current name should still work.
+    const entry2 = idx.lookup("adwaita-icon-theme") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("adwaita-icon-theme", idx.getString(entry2.name_offset));
+
+    // Lookup by old name should NOT find via the main lookup.
+    try std.testing.expect(idx.lookup("gnome-icon-theme") == null);
+
+    // Lookup by nonexistent old name should return null.
+    try std.testing.expect(idx.lookupByOldname("nonexistent") == null);
 }

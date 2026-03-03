@@ -17,6 +17,8 @@ pub const FormulaInfo = struct {
     disabled: bool,
     dependencies: []const []const u8,
     build_dependencies: []const []const u8,
+    oldnames: []const []const u8,
+    deprecation_replacement: []const u8,
     has_head: bool,
     caveats: []const u8,
     bottle_root_url: []const u8,
@@ -133,6 +135,12 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
     const build_dependencies = try parseStringArray(allocator, obj, "build_dependencies");
     errdefer freeStringSlice(allocator, build_dependencies);
 
+    const oldnames = try parseStringArray(allocator, obj, "oldnames");
+    errdefer freeStringSlice(allocator, oldnames);
+
+    const deprecation_replacement = try allocator.dupe(u8, jsonStr(obj, "deprecation_replacement_formula") orelse "");
+    errdefer allocator.free(deprecation_replacement);
+
     // Bottle info: bottle.stable.root_url, bottle.stable.files.{platform}.sha256, .cellar
     var bottle_root_url: []const u8 = try allocator.dupe(u8, "");
     errdefer allocator.free(bottle_root_url);
@@ -189,6 +197,8 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
         .caveats = caveats,
         .dependencies = dependencies,
         .build_dependencies = build_dependencies,
+        .oldnames = oldnames,
+        .deprecation_replacement = deprecation_replacement,
         .bottle_root_url = bottle_root_url,
         .bottle_sha256 = bottle_sha256,
         .bottle_cellar = bottle_cellar,
@@ -207,6 +217,8 @@ pub fn freeFormula(allocator: Allocator, f: FormulaInfo) void {
     allocator.free(f.caveats);
     freeStringSlice(allocator, f.dependencies);
     freeStringSlice(allocator, f.build_dependencies);
+    freeStringSlice(allocator, f.oldnames);
+    allocator.free(f.deprecation_replacement);
     allocator.free(f.bottle_root_url);
     allocator.free(f.bottle_sha256);
     allocator.free(f.bottle_cellar);
@@ -301,6 +313,8 @@ test "parseFormulaJson parses small payload" {
         \\  "caveats": null,
         \\  "dependencies": ["libgit2", "oniguruma"],
         \\  "build_dependencies": ["pkgconf", "rust"],
+        \\  "oldnames": [],
+        \\  "deprecation_replacement_formula": null,
         \\  "bottle": {
         \\    "stable": {
         \\      "root_url": "https://ghcr.io/v2/homebrew/core",
@@ -347,6 +361,10 @@ test "parseFormulaJson parses small payload" {
     try std.testing.expectEqual(@as(usize, 2), bat.build_dependencies.len);
     try std.testing.expectEqualStrings("pkgconf", bat.build_dependencies[0]);
     try std.testing.expectEqualStrings("rust", bat.build_dependencies[1]);
+
+    // Oldnames and deprecation replacement
+    try std.testing.expectEqual(@as(usize, 0), bat.oldnames.len);
+    try std.testing.expectEqualStrings("", bat.deprecation_replacement);
 
     // Bottle info
     try std.testing.expectEqualStrings("https://ghcr.io/v2/homebrew/core", bat.bottle_root_url);
@@ -410,4 +428,41 @@ test "parseFormulaJson loads real JWS payload" {
         }
     }
     try std.testing.expect(bat_found);
+}
+
+test "parseFormulaJson parses oldnames and replacement" {
+    const allocator = std.testing.allocator;
+
+    const json_bytes =
+        \\[{
+        \\  "name": "adwaita-icon-theme",
+        \\  "full_name": "adwaita-icon-theme",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "Icons for GNOME",
+        \\  "homepage": "https://gnome.org",
+        \\  "license": "LGPL-3.0",
+        \\  "versions": {"stable": "46.0", "head": null},
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "deprecated": false,
+        \\  "disabled": false,
+        \\  "caveats": null,
+        \\  "dependencies": [],
+        \\  "build_dependencies": [],
+        \\  "oldnames": ["gnome-icon-theme"],
+        \\  "deprecation_replacement_formula": null,
+        \\  "bottle": {}
+        \\}]
+    ;
+
+    const formulae = try parseFormulaJson(allocator, json_bytes);
+    defer {
+        for (formulae) |f| freeFormula(allocator, f);
+        allocator.free(formulae);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), formulae.len);
+    try std.testing.expectEqual(@as(usize, 1), formulae[0].oldnames.len);
+    try std.testing.expectEqualStrings("gnome-icon-theme", formulae[0].oldnames[0]);
+    try std.testing.expectEqualStrings("", formulae[0].deprecation_replacement);
 }

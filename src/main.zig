@@ -121,6 +121,7 @@ test {
     _ = @import("cmd/cat.zig");
     _ = @import("cmd/analytics.zig");
     _ = @import("cmd/completions.zig");
+    _ = @import("cmd/migrate.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");
@@ -142,4 +143,5 @@ test {
     _ = @import("fuzzy.zig");
     _ = @import("timer.zig");
     _ = @import("clonefile.zig");
+    _ = @import("tap_migrations.zig");
 }
