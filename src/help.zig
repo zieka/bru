@@ -44,6 +44,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  fetch      Download a formula without installing
         \\  config     Show Homebrew configuration
         \\  log        Show the git log for a formula or cask
+        \\  edit       Open a formula or cask source file in an editor
         \\  commands   List available commands
         \\
         \\Environment commands:
@@ -315,6 +316,19 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --quiet, -q        List command names only (no section headers)
             \\
         },
+        .{ "edit",
+            \\Usage: bru edit [formula|cask]
+            \\
+            \\Open a formula or cask source file in an editor.
+            \\With no arguments, opens the Homebrew repository directory.
+            \\
+            \\Uses $HOMEBREW_EDITOR, $EDITOR, or $VISUAL (in that order).
+            \\
+            \\Options:
+            \\  --formula  Treat argument as a formula
+            \\  --cask     Treat argument as a cask
+            \\
+        },
         .{ "tap",
             \\Usage: bru tap [options] [user/repo] [URL]
             \\
@@ -356,6 +370,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("desc") != null);
     try std.testing.expect(getCommandHelp("pin") != null);
     try std.testing.expect(getCommandHelp("unpin") != null);
+    try std.testing.expect(getCommandHelp("edit") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
