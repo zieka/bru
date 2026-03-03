@@ -51,6 +51,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\
         \\Environment commands:
         \\  shellenv     Print export statements for shell integration
+        \\  env          Print build environment variables
         \\  completions  Print or manage shell completion scripts
         \\
         \\Global options:
@@ -295,6 +296,19 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\Add to your shell profile: eval "$(bru shellenv)"
             \\
         },
+        .{ "env",
+            \\Usage: bru env [--plain] [--shell=SHELL]
+            \\
+            \\Print Homebrew's build environment variables.
+            \\
+            \\Options:
+            \\  --plain        Print as "KEY: VALUE" (one per line)
+            \\  --shell=SHELL  Print for a specific shell (bash/fish/csh)
+            \\
+            \\The default output uses bash export syntax.
+            \\Alias: --env
+            \\
+        },
         .{ "pin",
             \\Usage: bru pin <formula>
             \\
@@ -414,6 +428,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("cat") != null);
     try std.testing.expect(getCommandHelp("analytics") != null);
     try std.testing.expect(getCommandHelp("completions") != null);
+    try std.testing.expect(getCommandHelp("env") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
