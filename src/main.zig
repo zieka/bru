@@ -109,6 +109,7 @@ test {
     _ = @import("cmd/shellenv.zig");
     _ = @import("cmd/log.zig");
     _ = @import("cmd/casks.zig");
+    _ = @import("cmd/formulae.zig");
     _ = @import("cmd/home.zig");
     _ = @import("cmd/commands.zig");
     _ = @import("cmd/desc.zig");
