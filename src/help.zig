@@ -34,6 +34,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\
         \\Package management commands:
         \\  pin        Prevent a formula from being upgraded
+        \\  unpin      Allow a pinned formula to be upgraded again
         \\  tap        Manage third-party formula repositories
         \\
         \\Maintenance commands:
@@ -296,6 +297,13 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\No output on success.
             \\
         },
+        .{ "unpin",
+            \\Usage: bru unpin <formula>
+            \\
+            \\Allow a previously pinned formula to be upgraded again.
+            \\No output on success.
+            \\
+        },
         .{ "commands",
             \\Usage: bru commands [--include-aliases] [--quiet]
             \\
@@ -337,6 +345,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("uses") != null);
     try std.testing.expect(getCommandHelp("desc") != null);
     try std.testing.expect(getCommandHelp("pin") != null);
+    try std.testing.expect(getCommandHelp("unpin") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
