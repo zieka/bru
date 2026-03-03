@@ -50,7 +50,8 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  analytics  Manage anonymous aggregate user analytics
         \\
         \\Environment commands:
-        \\  shellenv   Print export statements for shell integration
+        \\  shellenv     Print export statements for shell integration
+        \\  completions  Print or manage shell completion scripts
         \\
         \\Global options:
         \\  --help, -h       Show this help
@@ -375,6 +376,21 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  regenerate-uuid    Deprecated (no longer necessary)
             \\
         },
+        .{ "completions",
+            \\Usage: bru completions [state|link|unlink]
+            \\
+            \\Control whether bru automatically links shell completion files.
+            \\
+            \\bru completions [state]:
+            \\    Display the current state of bru's completions.
+            \\
+            \\bru completions link:
+            \\    Write completion scripts into shell completion directories.
+            \\
+            \\bru completions unlink:
+            \\    Remove completion scripts from shell completion directories.
+            \\
+        },
     };
 
     inline for (entries) |pair| {
@@ -397,6 +413,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("edit") != null);
     try std.testing.expect(getCommandHelp("cat") != null);
     try std.testing.expect(getCommandHelp("analytics") != null);
+    try std.testing.expect(getCommandHelp("completions") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
