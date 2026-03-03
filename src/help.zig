@@ -31,15 +31,13 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  home       Open homepage of a formula or cask
         \\  casks      List all available cask names
         \\  formulae   List all available formula names
+        \\  cat        Display the source of a formula or cask
         \\
         \\Package management commands:
         \\  pin        Prevent a formula from being upgraded
         \\  unpin      Allow a pinned formula to be upgraded again
         \\  tap        Manage third-party formula repositories
         \\  untap      Remove a tapped formula repository
-        \\
-        \\Diagnostic commands:
-        \\  doctor     Check your system for potential problems
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
@@ -332,16 +330,6 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --cask     Treat argument as a cask
             \\
         },
-        .{ "doctor",
-            \\Usage: bru doctor
-            \\
-            \\Check your system for potential problems.
-            \\Checks for broken symlinks, unlinked kegs, stale lock files,
-            \\junk files, directory permissions, and PATH configuration.
-            \\
-            \\Alias: dr
-            \\
-        },
         .{ "tap",
             \\Usage: bru tap [options] [user/repo] [URL]
             \\
@@ -364,6 +352,16 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --force, -f  Untap even if formulae or casks from this tap are currently installed
             \\
         },
+        .{ "cat",
+            \\Usage: bru cat [--formula | --cask] <formula|cask>
+            \\
+            \\Display the source code (Ruby .rb file) of a formula or cask.
+            \\
+            \\Options:
+            \\  --formula  Treat argument as a formula
+            \\  --cask     Treat argument as a cask
+            \\
+        },
     };
 
     inline for (entries) |pair| {
@@ -384,6 +382,7 @@ test "getCommandHelp returns help for known commands" {
     try std.testing.expect(getCommandHelp("pin") != null);
     try std.testing.expect(getCommandHelp("unpin") != null);
     try std.testing.expect(getCommandHelp("edit") != null);
+    try std.testing.expect(getCommandHelp("cat") != null);
 }
 
 test "getCommandHelp returns null for unknown commands" {
