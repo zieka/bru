@@ -133,6 +133,15 @@ BENCHMARKS=(
     "search bat|sorted|search bat"
     "deps bat|exact|deps bat"
     "info bat|loose|info bat"
+    "desc bat|loose|desc bat"
+    "cat bat|exact|cat bat"
+    "formulae|sorted|formulae"
+    "casks|sorted|casks"
+    "commands|sorted|commands"
+    "log bat -n 1|loose|log bat -n 1"
+    "shellenv|exact|shellenv"
+    "doctor|loose|doctor"
+    "env --plain|loose|env --plain"
 )
 
 # ── Run benchmarks ───────────────────────────────────────────────────
