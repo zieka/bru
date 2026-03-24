@@ -34,6 +34,10 @@ const analytics = @import("cmd/analytics.zig");
 const completions = @import("cmd/completions.zig");
 const env_cmd = @import("cmd/env.zig");
 const migrate = @import("cmd/migrate.zig");
+const rollback = @import("cmd/rollback.zig");
+const bundle = @import("cmd/bundle.zig");
+const services = @import("cmd/services.zig");
+const self_update = @import("cmd/self_update.zig");
 
 /// Result of parsing process arguments into global flags, command name, and command args.
 pub const ParsedArgs = struct {
@@ -99,6 +103,10 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "completions", .handler = completions.completionsCmd },
     .{ .name = "env", .handler = env_cmd.envCmd },
     .{ .name = "migrate", .handler = migrate.migrateCmd },
+    .{ .name = "rollback", .handler = rollback.rollbackCmd },
+    .{ .name = "bundle", .handler = bundle.bundleCmd },
+    .{ .name = "services", .handler = services.servicesCmd },
+    .{ .name = "self-update", .handler = self_update.selfUpdateCmd },
 };
 
 /// Parse process argv into global flags, command name, and remaining args.
@@ -205,6 +213,9 @@ pub const alias_entries = .{
     .{ "formula", "formulae" },
     .{ "--config", "config" },
     .{ "--env", "env" },
+    .{ "rb", "rollback" },
+    .{ "service", "services" },
+    .{ "selfupdate", "self-update" },
 };
 
 /// Resolve a command alias to its canonical command name.

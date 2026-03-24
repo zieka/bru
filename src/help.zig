@@ -39,6 +39,8 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  tap        Manage third-party formula repositories
         \\  untap      Remove a tapped formula repository
         \\  migrate    Migrate renamed or deprecated formulae
+        \\  rollback   Roll back a formula to its previous version
+        \\  bundle     Create and install from Brewfile package lists
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
@@ -49,11 +51,15 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\  edit       Open a formula or cask source file in an editor
         \\  commands   List available commands
         \\  analytics  Manage anonymous aggregate user analytics
+        \\  self-update Update bru itself to the latest version
         \\
         \\Environment commands:
         \\  shellenv     Print export statements for shell integration
         \\  env          Print build environment variables
         \\  completions  Print or manage shell completion scripts
+        \\
+        \\Service commands:
+        \\  services   Manage background services (start/stop/restart)
         \\
         \\Global options:
         \\  --help, -h       Show this help
@@ -418,6 +424,62 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\  --dry-run, -n  Show what would be migrated without making changes
             \\  --formula      Only migrate formulae
             \\  --cask         Only migrate casks
+            \\
+        },
+        .{ "rollback",
+            \\Usage: bru rollback [options] <formula>
+            \\
+            \\Roll back a formula to its previously installed version.
+            \\Uses bru's install history to determine the previous version.
+            \\
+            \\Options:
+            \\  --dry-run, -n  Show what would be rolled back
+            \\  --list, -l     List all rollback-eligible formulae
+            \\
+            \\Alias: rb
+            \\
+        },
+        .{ "bundle",
+            \\Usage: bru bundle <subcommand> [options]
+            \\
+            \\Create and install from Brewfile package lists.
+            \\
+            \\Subcommands:
+            \\  dump     Export installed packages to a Brewfile
+            \\  install  Install all packages from a Brewfile
+            \\
+            \\Options:
+            \\  --file=PATH   Specify Brewfile path (default: ./Brewfile)
+            \\  --no-cask     Skip cask entries during install
+            \\  --describe    Add descriptions as comments during dump
+            \\
+        },
+        .{ "services",
+            \\Usage: bru services [subcommand] [formula]
+            \\
+            \\Manage background services for installed formulae.
+            \\
+            \\Subcommands:
+            \\  list               List all services (default)
+            \\  start <formula>    Start a service
+            \\  stop <formula>     Stop a service
+            \\  restart <formula>  Restart a service
+            \\  run <formula>      Run service in foreground
+            \\  info <formula>     Show service details
+            \\
+            \\Alias: service
+            \\
+        },
+        .{ "self-update",
+            \\Usage: bru self-update [options]
+            \\
+            \\Update bru itself to the latest version.
+            \\
+            \\Options:
+            \\  --check  Check for updates without installing
+            \\  --force  Re-download even if already up-to-date
+            \\
+            \\Alias: selfupdate
             \\
         },
     };

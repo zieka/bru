@@ -350,6 +350,14 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
         };
 
         out.print("{s} {s} upgraded.\n", .{ item.name, version });
+
+        // Record upgrade in state history.
+        {
+            var state = @import("../state.zig").State.load(allocator);
+            defer state.deinit();
+            state.recordAction("upgrade", item.name, version, item.installed_version) catch {};
+            state.save() catch {};
+        }
     }
 }
 

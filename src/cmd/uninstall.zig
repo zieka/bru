@@ -83,6 +83,14 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     const done_title = try std.fmt.allocPrint(allocator, "{s} is uninstalled", .{name});
     defer allocator.free(done_title);
     out.section(done_title);
+
+    // Record uninstall in state history.
+    {
+        var state = @import("../state.zig").State.load(allocator);
+        defer state.deinit();
+        state.recordAction("uninstall", name, versions[0], null) catch {};
+        state.save() catch {};
+    }
 }
 
 // ---------------------------------------------------------------------------

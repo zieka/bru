@@ -280,6 +280,14 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ name, version });
     defer allocator.free(done_title);
     out.section(done_title);
+
+    // Record install in state history.
+    {
+        var state = @import("../state.zig").State.load(allocator);
+        defer state.deinit();
+        state.recordAction("install", name, version, null) catch {};
+        state.save() catch {};
+    }
 }
 
 /// Install a cask by token: fetch metadata, download, extract, stage binaries, link.
