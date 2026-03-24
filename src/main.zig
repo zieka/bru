@@ -122,6 +122,10 @@ test {
     _ = @import("cmd/analytics.zig");
     _ = @import("cmd/completions.zig");
     _ = @import("cmd/migrate.zig");
+    _ = @import("cmd/rollback.zig");
+    _ = @import("cmd/bundle.zig");
+    _ = @import("cmd/services.zig");
+    _ = @import("cmd/self_update.zig");
     _ = @import("help.zig");
     _ = @import("config.zig");
     _ = @import("dispatch.zig");
@@ -144,4 +148,5 @@ test {
     _ = @import("timer.zig");
     _ = @import("clonefile.zig");
     _ = @import("tap_migrations.zig");
+    _ = @import("state.zig");
 }
