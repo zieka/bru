@@ -5,9 +5,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const enable_trace = b.option(bool, "trace", "Emit Chrome Trace JSON for profiling") orelse false;
+    const version = b.option([]const u8, "version", "Build version string") orelse "dev";
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "trace", enable_trace);
+    build_options.addOption([]const u8, "version", version);
 
     const exe = b.addExecutable(.{
         .name = "bru",
