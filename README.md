@@ -1,5 +1,7 @@
 # bru
 
+[https://zieka.github.io/bru](https://zieka.github.io/bru)
+
 Homebrew, reimagined in native code.
 
 A fast, native implementation of common Homebrew commands written in Zig. Drop-in compatible — falls back to `brew` for anything not yet implemented.
