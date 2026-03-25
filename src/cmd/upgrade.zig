@@ -14,7 +14,6 @@ const tab_mod = @import("../tab.zig");
 const Tab = tab_mod.Tab;
 const RuntimeDep = tab_mod.RuntimeDep;
 const HttpClient = @import("../http.zig").HttpClient;
-const batch_download = @import("../batch_download.zig");
 const installCmd = @import("install.zig").installCmd;
 const isPinned = @import("pin.zig").isPinned;
 
@@ -25,8 +24,177 @@ const OutdatedFormula = struct {
     index_version: PkgVersion,
 };
 
-/// Upgrade outdated formulae natively: parallel bottle prefetch, then
-/// sequential download/extract/link for each outdated formula.
+/// Result of preparing a single package for upgrade (download, extract,
+/// placeholders, receipt). Returned by `prepareOne`.
+const PrepareResult = union(enum) {
+    success: struct {
+        keg_path: []const u8,
+        version: []const u8,
+        keg_only: bool,
+    },
+    failure: struct {
+        err_name: []const u8,
+    },
+};
+
+/// Read-only shared state passed to `prepareOne`. Contains references to
+/// structures that are safe to share across worker threads.
+const PrepareContext = struct {
+    index: *Index,
+    config: Config,
+};
+
+/// Prepare a single outdated formula for upgrade: download the bottle,
+/// extract it, replace placeholders, and write the install receipt.
+///
+/// This function is self-contained — it creates its own HttpClient and
+/// allocates exclusively from the provided arena. It never touches the
+/// linker, state, or any shared mutable state, making it safe to call
+/// from a worker thread.
+///
+/// Returns `.success` with the keg path, version, and keg_only flag on
+/// success, or `.failure` with the error name if anything goes wrong.
+fn prepareOne(arena: Allocator, ctx: PrepareContext, item: OutdatedFormula) PrepareResult {
+    const entry = ctx.index.lookup(item.name) orelse {
+        return .{ .failure = .{ .err_name = "FormulaNotFound" } };
+    };
+
+    // Check that a bottle is available.
+    const bottle_root_url = ctx.index.getString(entry.bottle_root_url_offset);
+    const bottle_sha256 = ctx.index.getString(entry.bottle_sha256_offset);
+
+    if (bottle_root_url.len == 0 or bottle_sha256.len == 0) {
+        return .{ .failure = .{ .err_name = "NoBottleAvailable" } };
+    }
+
+    const version = ctx.index.getString(entry.version_offset);
+
+    // Build the download URL.
+    const image_name = download.ghcrImageName(arena, item.name) catch |err| {
+        return .{ .failure = .{ .err_name = @errorName(err) } };
+    };
+
+    const url = std.fmt.allocPrint(arena, "{s}/{s}/blobs/sha256:{s}", .{
+        bottle_root_url, image_name, bottle_sha256,
+    }) catch |err| {
+        return .{ .failure = .{ .err_name = @errorName(err) } };
+    };
+
+    // Download bottle.
+    var http_client = HttpClient.init(arena);
+    defer http_client.deinit();
+
+    var dl = Download.init(arena, ctx.config.cache, &http_client);
+    const archive_path = dl.fetchBottle(url, item.name, bottle_sha256) catch |err| {
+        return .{ .failure = .{ .err_name = @errorName(err) } };
+    };
+
+    // Extract new bottle into cellar.
+    var bottle_inst = Bottle.init(arena, ctx.config);
+    const keg_cache_dir = std.fmt.allocPrint(arena, "{s}/kegs", .{ctx.config.cache}) catch |err| {
+        return .{ .failure = .{ .err_name = @errorName(err) } };
+    };
+    const keg_path = bottle_inst.pourWithCache(archive_path, item.name, version, bottle_sha256, keg_cache_dir) catch |err| {
+        return .{ .failure = .{ .err_name = @errorName(err) } };
+    };
+
+    // Replace placeholders.
+    bottle_inst.replacePlaceholders(keg_path) catch {};
+
+    // Build runtime_dependencies and write install receipt.
+    {
+        const dep_names = ctx.index.getStringList(arena, entry.deps_offset) catch |err| {
+            return .{ .failure = .{ .err_name = @errorName(err) } };
+        };
+
+        var runtime_deps = std.ArrayList(RuntimeDep).initCapacity(arena, dep_names.len) catch |err| {
+            return .{ .failure = .{ .err_name = @errorName(err) } };
+        };
+
+        for (dep_names) |dep_name| {
+            const dep_entry = ctx.index.lookup(dep_name) orelse continue;
+            const dep_version = ctx.index.getString(dep_entry.version_offset);
+            const dep_revision = dep_entry.revision;
+
+            var pkg_ver_buf: [256]u8 = undefined;
+            const pkg_version = if (dep_revision > 0)
+                std.fmt.bufPrint(&pkg_ver_buf, "{s}_{d}", .{ dep_version, dep_revision }) catch continue
+            else
+                dep_version;
+
+            const full_name = arena.dupe(u8, dep_name) catch continue;
+            const version_str = arena.dupe(u8, dep_version) catch continue;
+            const pkg_ver = arena.dupe(u8, pkg_version) catch continue;
+
+            runtime_deps.appendAssumeCapacity(.{
+                .full_name = full_name,
+                .version = version_str,
+                .revision = dep_revision,
+                .pkg_version = pkg_ver,
+                .declared_directly = true,
+            });
+        }
+
+        const tab = Tab{
+            .installed_on_request = true,
+            .poured_from_bottle = true,
+            .loaded_from_api = true,
+            .time = std.time.timestamp(),
+            .runtime_dependencies = runtime_deps.items,
+            .compiler = "clang",
+            .homebrew_version = "bru 0.1.0",
+            .source_tap = "homebrew/core",
+        };
+        tab.writeToKeg(arena, keg_path) catch |err| {
+            return .{ .failure = .{ .err_name = @errorName(err) } };
+        };
+    }
+
+    const keg_only = (entry.flags & 1) != 0;
+
+    return .{ .success = .{
+        .keg_path = keg_path,
+        .version = version,
+        .keg_only = keg_only,
+    } };
+}
+
+const PrepareWorkerContext = struct {
+    items: []const OutdatedFormula,
+    results: []PrepareResult,
+    arenas: []std.heap.ArenaAllocator,
+    next_index: *usize,
+    prepare_ctx: PrepareContext,
+};
+
+/// Worker thread: claims items via atomic counter, prepares each in its own
+/// arena. Arenas are stored in the shared array so they outlive the worker
+/// (the caller deinits them after consuming results).
+fn prepareWorker(ctx: PrepareWorkerContext) void {
+    while (true) {
+        const i = @atomicRmw(usize, ctx.next_index, .Add, 1, .seq_cst);
+        if (i >= ctx.items.len) return;
+
+        ctx.arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        ctx.results[i] = prepareOne(ctx.arenas[i].allocator(), ctx.prepare_ctx, ctx.items[i]);
+    }
+}
+
+const CleanupContext = struct {
+    paths: []const []const u8,
+    next_index: *usize,
+};
+
+fn cleanupWorker(ctx: CleanupContext) void {
+    while (true) {
+        const i = @atomicRmw(usize, ctx.next_index, .Add, 1, .seq_cst);
+        if (i >= ctx.paths.len) return;
+        std.fs.deleteTreeAbsolute(ctx.paths[i]) catch {};
+    }
+}
+
+/// Upgrade outdated formulae: parallel prepare (download/extract/receipt
+/// via worker threads), then sequential swap (unlink/link).
 ///
 /// Usage:
 ///   bru upgrade              — upgrade all outdated formulae
@@ -158,205 +326,155 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
         out.print("{s} {s} -> {s}\n", .{ item.name, item.installed_version, new_formatted });
     }
 
-    // --- Parallel prefetch phase ---
-    var http_client = HttpClient.init(allocator);
-    defer http_client.deinit();
+    // --- Dependency pre-scan: install missing deps before parallel prepare ---
+    {
+        var all_missing = std.StringHashMap(void).init(allocator);
+        defer all_missing.deinit();
 
-    var tasks = std.ArrayList(batch_download.DownloadTask){};
-    defer {
-        for (tasks.items) |task| allocator.free(task.url);
-        tasks.deinit(allocator);
-    }
-
-    for (to_upgrade.items) |item| {
-        batch_download.addDownloadTask(allocator, &index, &tasks, item.name) catch continue;
-    }
-
-    if (tasks.items.len > 0) {
-        out.print("\nPrefetching {d} bottle{s}...\n", .{
-            tasks.items.len,
-            if (tasks.items.len == 1) "" else "s",
-        });
-        batch_download.fetchAll(tasks.items, config.cache, &http_client);
-    }
-
-    // --- Sequential install phase ---
-    var linker = Linker.init(allocator, config.prefix);
-
-    for (to_upgrade.items) |item| {
-        var fmt_buf: [128]u8 = undefined;
-        const new_formatted = item.index_version.format(&fmt_buf);
-
-        const title = try std.fmt.allocPrint(allocator, "Upgrading {s} {s} -> {s}", .{
-            item.name,
-            item.installed_version,
-            new_formatted,
-        });
-        defer allocator.free(title);
-        out.section(title);
-
-        const entry = index.lookup(item.name) orelse continue;
-
-        // 1. Check for missing dependencies and install them.
-        var dep_failed = false;
-        {
-            const dep_names = try index.getStringList(allocator, entry.deps_offset);
+        for (to_upgrade.items) |item| {
+            const entry = index.lookup(item.name) orelse continue;
+            const dep_names = index.getStringList(allocator, entry.deps_offset) catch continue;
             defer allocator.free(dep_names);
 
             for (dep_names) |dep_name| {
-                if (!cellar.isInstalled(dep_name)) {
+                if (!cellar.isInstalled(dep_name) and !all_missing.contains(dep_name)) {
+                    all_missing.put(dep_name, {}) catch continue;
                     out.print("Installing missing dependency: {s}...\n", .{dep_name});
                     const dep_args = &[_][]const u8{dep_name};
                     installCmd(allocator, dep_args, config) catch |install_err| {
                         err_out.err("Failed to install dependency \"{s}\": {s}", .{ dep_name, @errorName(install_err) });
-                        dep_failed = true;
-                        break;
                     };
                 }
             }
         }
-        if (dep_failed) {
-            err_out.err("Skipping {s} due to dependency failure.", .{item.name});
-            continue;
+    }
+
+    // --- Parallel prepare phase ---
+    out.print("\nPreparing {d} package{s}...\n", .{
+        to_upgrade.items.len,
+        if (to_upgrade.items.len == 1) "" else "s",
+    });
+
+    const results = try allocator.alloc(PrepareResult, to_upgrade.items.len);
+    defer allocator.free(results);
+
+    // Per-item arenas kept alive until after swap phase so keg_path pointers
+    // in PrepareResult.success remain valid.
+    const arenas = try allocator.alloc(std.heap.ArenaAllocator, to_upgrade.items.len);
+    for (arenas) |*a| a.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer {
+        for (arenas) |*a| a.deinit();
+        allocator.free(arenas);
+    }
+
+    // Initialize all results to failure.
+    for (results) |*r| {
+        r.* = .{ .failure = .{ .err_name = "NotStarted" } };
+    }
+
+    const prepare_ctx = PrepareContext{
+        .index = &index,
+        .config = config,
+    };
+
+    {
+        const max_workers = 4;
+        const worker_count = @min(max_workers, to_upgrade.items.len);
+        var next_index: usize = 0;
+        const worker_ctx = PrepareWorkerContext{
+            .items = to_upgrade.items,
+            .results = results,
+            .arenas = arenas,
+            .next_index = &next_index,
+            .prepare_ctx = prepare_ctx,
+        };
+
+        var threads: [max_workers]std.Thread = undefined;
+        var spawned: usize = 0;
+        for (0..worker_count) |ti| {
+            threads[ti] = std.Thread.spawn(.{}, prepareWorker, .{worker_ctx}) catch break;
+            spawned += 1;
         }
-
-        // 2. Download bottle (should be a cache hit from prefetch).
-        const bottle_root_url = index.getString(entry.bottle_root_url_offset);
-        const bottle_sha256 = index.getString(entry.bottle_sha256_offset);
-
-        if (bottle_root_url.len == 0 or bottle_sha256.len == 0) {
-            err_out.err("No bottle available for \"{s}\". Skipping.", .{item.name});
-            continue;
+        for (0..spawned) |ti| {
+            threads[ti].join();
         }
+    }
 
-        const version = index.getString(entry.version_offset);
+    // --- Sequential swap phase ---
+    var linker = Linker.init(allocator, config.prefix);
+    var old_kegs = std.ArrayList([]const u8){};
+    defer {
+        for (old_kegs.items) |p| allocator.free(p);
+        old_kegs.deinit(allocator);
+    }
 
-        const image_name = try download.ghcrImageName(allocator, item.name);
-        defer allocator.free(image_name);
+    for (to_upgrade.items, results) |item, result| {
+        switch (result) {
+            .failure => |f| {
+                err_out.err("Failed to prepare {s}: {s}", .{ item.name, f.err_name });
+                continue;
+            },
+            .success => |s| {
+                // Unlink old version.
+                var old_keg_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const old_keg_path = std.fmt.bufPrint(&old_keg_buf, "{s}/{s}/{s}", .{
+                    config.cellar, item.name, item.installed_version,
+                }) catch continue;
 
-        const url = try std.fmt.allocPrint(allocator, "{s}/{s}/blobs/sha256:{s}", .{
-            bottle_root_url, image_name, bottle_sha256,
-        });
-        defer allocator.free(url);
+                linker.unlink(old_keg_path) catch |err| {
+                    out.warn("Failed to unlink old {s} {s}: {s}", .{
+                        item.name, item.installed_version, @errorName(err),
+                    });
+                };
 
-        var dl = Download.init(allocator, config.cache, &http_client);
-        const archive_path = dl.fetchBottle(url, item.name, bottle_sha256) catch |err| {
-            err_out.err("Download failed for {s}: {s}", .{ item.name, @errorName(err) });
-            continue;
-        };
-        defer allocator.free(archive_path);
-
-        // 3. Extract new bottle into cellar.
-        out.print("Pouring {s} {s}...\n", .{ item.name, version });
-        var bottle_inst = Bottle.init(allocator, config);
-        const keg_cache_dir = std.fmt.allocPrint(allocator, "{s}/kegs", .{config.cache}) catch continue;
-        defer allocator.free(keg_cache_dir);
-        const keg_path = bottle_inst.pourWithCache(archive_path, item.name, version, bottle_sha256, keg_cache_dir) catch |err| {
-            err_out.err("Extraction failed for {s}: {s}", .{ item.name, @errorName(err) });
-            continue;
-        };
-        defer allocator.free(keg_path);
-
-        // 4. Replace placeholders.
-        bottle_inst.replacePlaceholders(keg_path) catch |err| {
-            err_out.err("Placeholder replacement failed for {s}: {s}", .{ item.name, @errorName(err) });
-        };
-
-        // 5. Build runtime_dependencies and write install receipt.
-        {
-            const dep_names = try index.getStringList(allocator, entry.deps_offset);
-            defer allocator.free(dep_names);
-
-            var runtime_deps = try std.ArrayList(RuntimeDep).initCapacity(allocator, dep_names.len);
-            defer {
-                for (runtime_deps.items) |dep| {
-                    allocator.free(dep.full_name);
-                    allocator.free(dep.version);
-                    allocator.free(dep.pkg_version);
+                // Link new version.
+                if (s.keg_only) {
+                    linker.optLink(item.name, s.keg_path) catch |err| {
+                        err_out.err("Failed to link {s}: {s}", .{ item.name, @errorName(err) });
+                    };
+                } else {
+                    linker.link(item.name, s.keg_path) catch |err| {
+                        err_out.err("Failed to link {s}: {s}", .{ item.name, @errorName(err) });
+                    };
                 }
-                runtime_deps.deinit(allocator);
-            }
 
-            for (dep_names) |dep_name| {
-                const dep_entry = index.lookup(dep_name) orelse continue;
-                const dep_version = index.getString(dep_entry.version_offset);
-                const dep_revision = dep_entry.revision;
+                out.print("{s} {s} upgraded.\n", .{ item.name, s.version });
 
-                var pkg_ver_buf: [256]u8 = undefined;
-                const pkg_version = if (dep_revision > 0)
-                    std.fmt.bufPrint(&pkg_ver_buf, "{s}_{d}", .{ dep_version, dep_revision }) catch continue
-                else
-                    dep_version;
+                // Record state.
+                {
+                    var state = @import("../state.zig").State.load(allocator);
+                    defer state.deinit();
+                    state.recordAction("upgrade", item.name, s.version, item.installed_version) catch {};
+                    state.save() catch {};
+                }
 
-                const full_name = try allocator.dupe(u8, dep_name);
-                errdefer allocator.free(full_name);
-                const version_str = try allocator.dupe(u8, dep_version);
-                errdefer allocator.free(version_str);
-                const pkg_ver = try allocator.dupe(u8, pkg_version);
-
-                runtime_deps.appendAssumeCapacity(.{
-                    .full_name = full_name,
-                    .version = version_str,
-                    .revision = dep_revision,
-                    .pkg_version = pkg_ver,
-                    .declared_directly = true,
-                });
-            }
-
-            const tab = Tab{
-                .installed_on_request = true,
-                .poured_from_bottle = true,
-                .loaded_from_api = true,
-                .time = std.time.timestamp(),
-                .runtime_dependencies = runtime_deps.items,
-                .compiler = "clang",
-                .homebrew_version = "bru 0.1.0",
-                .source_tap = "homebrew/core",
-            };
-            tab.writeToKeg(allocator, keg_path) catch |err| {
-                err_out.err("Failed to write receipt for {s}: {s}", .{ item.name, @errorName(err) });
-            };
+                // Collect old keg path for cleanup.
+                const old_keg_copy = allocator.dupe(u8, old_keg_path) catch continue;
+                old_kegs.append(allocator, old_keg_copy) catch {
+                    allocator.free(old_keg_copy);
+                };
+            },
         }
+    }
 
-        // 6. Unlink old version from prefix, link new, remove old keg.
-        var old_keg_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const old_keg_path = std.fmt.bufPrint(&old_keg_buf, "{s}/{s}/{s}", .{
-            config.cellar, item.name, item.installed_version,
-        }) catch continue;
-
-        linker.unlink(old_keg_path) catch |err| {
-            out.warn("Failed to unlink old {s} {s}: {s}", .{
-                item.name, item.installed_version, @errorName(err),
-            });
+    // --- Parallel cleanup phase ---
+    if (old_kegs.items.len > 0) {
+        const max_cleanup = 4;
+        const cleanup_count = @min(max_cleanup, old_kegs.items.len);
+        var cleanup_next: usize = 0;
+        const cleanup_ctx = CleanupContext{
+            .paths = old_kegs.items,
+            .next_index = &cleanup_next,
         };
 
-        // 7. Link new version into prefix.
-        const keg_only = (entry.flags & 1) != 0;
-        if (keg_only) {
-            linker.optLink(item.name, keg_path) catch |err| {
-                err_out.err("Failed to link {s}: {s}", .{ item.name, @errorName(err) });
-            };
-        } else {
-            linker.link(item.name, keg_path) catch |err| {
-                err_out.err("Failed to link {s}: {s}", .{ item.name, @errorName(err) });
-            };
+        var cleanup_threads: [max_cleanup]std.Thread = undefined;
+        var cleanup_spawned: usize = 0;
+        for (0..cleanup_count) |ti| {
+            cleanup_threads[ti] = std.Thread.spawn(.{}, cleanupWorker, .{cleanup_ctx}) catch break;
+            cleanup_spawned += 1;
         }
-
-        // 8. Remove old keg directory.
-        std.fs.deleteTreeAbsolute(old_keg_path) catch |err| {
-            out.warn("Could not remove old keg {s}/{s}: {s}", .{
-                item.name, item.installed_version, @errorName(err),
-            });
-        };
-
-        out.print("{s} {s} upgraded.\n", .{ item.name, version });
-
-        // Record upgrade in state history.
-        {
-            var state = @import("../state.zig").State.load(allocator);
-            defer state.deinit();
-            state.recordAction("upgrade", item.name, version, item.installed_version) catch {};
-            state.save() catch {};
+        for (0..cleanup_spawned) |ti| {
+            cleanup_threads[ti].join();
         }
     }
 }
@@ -368,4 +486,22 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 test "upgradeCmd compiles and has correct signature" {
     const handler: @import("../dispatch.zig").CommandFn = upgradeCmd;
     _ = handler;
+}
+
+test "prepareOne compiles and has correct signature" {
+    const F = @TypeOf(prepareOne);
+    const info = @typeInfo(F);
+    try std.testing.expect(info == .@"fn");
+}
+
+test "prepareWorker compiles and has correct signature" {
+    const F = @TypeOf(prepareWorker);
+    const info = @typeInfo(F);
+    try std.testing.expect(info == .@"fn");
+}
+
+test "cleanupWorker compiles and has correct signature" {
+    const F = @TypeOf(cleanupWorker);
+    const info = @typeInfo(F);
+    try std.testing.expect(info == .@"fn");
 }
