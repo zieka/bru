@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const Config = @import("../config.zig").Config;
 const Output = @import("../output.zig").Output;
 const HttpClient = @import("../http.zig").HttpClient;
-const version_info = @import("../version_info.zig");
+const build_options = @import("build_options");
 
 const repo = "zieka/bru";
 const releases_url = "https://api.github.com/repos/" ++ repo ++ "/releases/latest";
@@ -30,7 +30,7 @@ pub fn selfUpdateCmd(allocator: std.mem.Allocator, args: []const []const u8, con
         }
     }
 
-    out.print("bru {s}\n", .{version_info.version});
+    out.print("bru {s}\n", .{build_options.version});
 
     // Print path to the running binary.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -63,7 +63,7 @@ pub fn selfUpdateCmd(allocator: std.mem.Allocator, args: []const []const u8, con
     out.print("Latest:  {s}\n", .{latest_version});
 
     // Compare versions.
-    const current = parseSemver(version_info.version) catch {
+    const current = parseSemver(build_options.version) catch {
         err_out.err("Could not parse current version.\n", .{});
         return error.ParseError;
     };
@@ -80,7 +80,7 @@ pub fn selfUpdateCmd(allocator: std.mem.Allocator, args: []const []const u8, con
 
     if (check_only) {
         out.section("Update available");
-        out.print("{s} -> {s}\n", .{ version_info.version, latest_version });
+        out.print("{s} -> {s}\n", .{ build_options.version, latest_version });
         out.print("Run `bru self-update` to install.\n", .{});
         return;
     }
@@ -122,7 +122,7 @@ pub fn selfUpdateCmd(allocator: std.mem.Allocator, args: []const []const u8, con
         return error.InstallFailed;
     };
 
-    out.print("bru updated: {s} -> {s}\n", .{ version_info.version, latest_version });
+    out.print("bru updated: {s} -> {s}\n", .{ build_options.version, latest_version });
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ test "selfUpdateCmd compiles and has correct signature" {
 }
 
 test "current version is a valid semver string" {
-    const v = try parseSemver(version_info.version);
+    const v = try parseSemver(build_options.version);
     try std.testing.expect(v.major < 1000);
 }
 
