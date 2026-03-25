@@ -296,6 +296,7 @@ test "selfUpdateCmd compiles and has correct signature" {
 }
 
 test "current version is a valid semver string" {
+    if (std.mem.eql(u8, build_options.version, "dev")) return; // skip in local dev builds
     const v = try parseSemver(build_options.version);
     try std.testing.expect(v.major < 1000);
 }

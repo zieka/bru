@@ -125,7 +125,7 @@ jobs:
 
       - name: Run tests
         if: matrix.target == 'aarch64-macos'
-        run: zig build test
+        run: zig build test -Dversion=${{ needs.version.outputs.version }}
 
       - name: Build release binary
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -Dversion=${{ needs.version.outputs.version }}
