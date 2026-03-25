@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>bru — Homebrew, reimagined in native code</title>
+  <title>bru — like brew, but native</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@1,400;1,700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #0a0a0a;
@@ -47,6 +50,18 @@
       justify-content: center;
     }
 
+    .hero::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 120px;
+      background: linear-gradient(transparent, var(--bg-section));
+      z-index: 5;
+      pointer-events: none;
+    }
+
     canvas#brew-canvas {
       position: absolute;
       top: 0;
@@ -65,56 +80,65 @@
     }
 
     .wordmark {
-      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Courier New', monospace;
-      font-size: clamp(4rem, 10vw, 7rem);
-      font-weight: 700;
+      font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+      font-style: italic;
+      font-size: clamp(5rem, 12vw, 9rem);
+      font-weight: 400;
       letter-spacing: -0.02em;
       color: var(--white);
       line-height: 1;
-      margin-bottom: 12px;
-      text-shadow: 0 0 60px rgba(212, 130, 10, 0.15);
+      margin-bottom: 8px;
+      text-shadow: 0 2px 30px rgba(0, 0, 0, 0.6), 0 0 60px rgba(212, 130, 10, 0.15);
     }
 
     .tagline {
-      font-size: clamp(0.95rem, 2vw, 1.15rem);
-      color: var(--gray);
-      margin-bottom: 40px;
-      font-weight: 400;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      font-size: clamp(0.85rem, 1.8vw, 1rem);
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 24px;
+      font-weight: 300;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
     }
 
     .install-block {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px 20px;
-      display: inline-flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
       cursor: pointer;
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
       max-width: 100%;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: none;
+      border: none;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 0;
+      padding: 0 0 6px 0;
+      transition: border-color 0.2s ease;
     }
 
     .install-block:hover {
-      border-color: #3a3a3a;
-      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      border-color: rgba(255, 255, 255, 0.4);
+      box-shadow: none;
     }
 
     .install-cmd {
       font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Courier New', monospace;
-      font-size: clamp(0.75rem, 1.5vw, 0.9rem);
-      color: var(--amber-light);
+      font-size: clamp(0.7rem, 1.3vw, 0.8rem);
+      color: rgba(255, 255, 255, 0.6);
       white-space: nowrap;
       overflow-x: auto;
       max-width: 100%;
       user-select: all;
+      letter-spacing: 0.02em;
     }
 
     .install-hint {
-      font-size: 0.75rem;
-      color: var(--gray);
+      font-size: 0.65rem;
+      color: rgba(255, 255, 255, 0.25);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
       transition: color 0.15s ease;
+      flex-shrink: 0;
     }
 
     .install-block.copied .install-hint {
@@ -132,46 +156,54 @@
       margin: 0 auto;
       display: flex;
       flex-direction: column;
+      align-items: center;
       gap: 32px;
     }
 
     .feature {
-      font-size: clamp(0.95rem, 1.8vw, 1.05rem);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      font-size: clamp(0.8rem, 1.6vw, 0.95rem);
       line-height: 1.7;
+      letter-spacing: 0.04em;
+      font-weight: 300;
     }
 
     .feature strong {
       color: var(--white);
-      font-weight: 600;
-    }
-
-    .feature span {
-      color: var(--gray-light);
       font-weight: 400;
     }
 
+    .feature span {
+      color: rgba(255, 255, 255, 0.4);
+      font-weight: 300;
+    }
+
     .github-link {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       margin-top: 48px;
-      font-size: 0.95rem;
-      color: var(--gray);
+      font-size: 0.85rem;
+      color: rgba(255, 255, 255, 0.4);
       text-decoration: none;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 2px;
-      transition: color 0.2s ease, border-color 0.2s ease;
+      letter-spacing: 0.04em;
+      font-weight: 300;
+      transition: color 0.2s ease;
     }
 
     .github-link:hover {
       color: var(--white);
-      border-color: var(--gray);
+    }
+
+    .github-link svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
     }
 
     @media (max-width: 480px) {
       .install-cmd {
-        font-size: 0.7rem;
-      }
-      .install-block {
-        padding: 14px 16px;
+        font-size: 0.65rem;
       }
     }
   </style>
@@ -182,10 +214,10 @@
     <canvas id="brew-canvas"></canvas>
     <div class="hero-content">
       <h1 class="wordmark">bru</h1>
-      <p class="tagline">Homebrew, reimagined in native code</p>
+      <p class="tagline">like brew, but native</p>
       <div class="install-block" id="install-block" role="button" tabindex="0" aria-label="Click to copy install command">
         <code class="install-cmd">curl -fsSL https://zieka.github.io/bru/install.sh | bash</code>
-        <span class="install-hint" id="install-hint">Click to copy</span>
+        <span class="install-hint" id="install-hint">copy</span>
       </div>
     </div>
   </section>
@@ -204,223 +236,111 @@
       <div class="feature">
         <strong>Single binary, zero dependencies</strong>
       </div>
-      <a class="github-link" href="https://github.com/zieka/bru" target="_blank" rel="noopener">View on GitHub</a>
+      <a class="github-link" href="https://github.com/zieka/bru" target="_blank" rel="noopener"><svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
     </div>
   </section>
 
   <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.170.0/build/three.module.js';
+    import * as THREE from 'https://esm.sh/three@0.170.0';
+    import { Water } from 'https://esm.sh/three@0.170.0/examples/jsm/objects/Water.js';
+    import { Sky } from 'https://esm.sh/three@0.170.0/examples/jsm/objects/Sky.js';
 
-    // ---- Easing ----
-    function easeOutQuad(t) { return t * (2 - t); }
-
-    // ---- Setup ----
+    // ---- Setup (matching Three.js ocean example) ----
     const canvas = document.getElementById('brew-canvas');
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setClearColor(0x0a0a0a, 1);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.1;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(
-      -window.innerWidth / 2, window.innerWidth / 2,
-      window.innerHeight / 2, -window.innerHeight / 2,
-      0.1, 100
+    const camera = new THREE.PerspectiveCamera(
+      55, window.innerWidth / window.innerHeight, 1, 20000
     );
-    camera.position.z = 10;
+    camera.position.set(30, 30, 100);
+    camera.lookAt(0, 10, 0);
 
-    // ---- Liquid shader — hyper-realistic beer ----
-    const liquidVertexShader = `
-      uniform float uTime;
-      uniform float uFillLevel;
-      varying vec2 vUv;
-      varying float vWorldY;
+    const sun = new THREE.Vector3();
 
-      void main() {
-        vUv = uv;
-        vec3 pos = position;
-
-        // Multi-frequency surface waves concentrated at the liquid surface
-        float surfaceDist = smoothstep(uFillLevel - 0.06, uFillLevel, uv.y);
-        float w1 = sin(uv.x * 5.0 + uTime * 1.2) * 3.5;
-        float w2 = sin(uv.x * 11.0 - uTime * 1.8) * 1.5;
-        float w3 = sin(uv.x * 23.0 + uTime * 2.5) * 0.7;
-        float w4 = sin(uv.x * 2.5 - uTime * 0.6) * 5.0;
-        pos.y += (w1 + w2 + w3 + w4) * surfaceDist;
-
-        vWorldY = pos.y;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
-      }
-    `;
-
-    const liquidFragmentShader = `
-      precision highp float;
-
-      uniform float uTime;
-      uniform float uFillLevel;
-      uniform vec2 uResolution;
-
-      varying vec2 vUv;
-      varying float vWorldY;
-
-      // Simplex-style noise for organic patterns
-      vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-      vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-      vec3 permute(vec3 x) { return mod289(((x * 34.0) + 1.0) * x); }
-
-      float snoise(vec2 v) {
-        const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                           -0.577350269189626, 0.024390243902439);
-        vec2 i = floor(v + dot(v, C.yy));
-        vec2 x0 = v - i + dot(i, C.xx);
-        vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-        vec4 x12 = x0.xyxy + C.xxzz;
-        x12.xy -= i1;
-        i = mod289(i);
-        vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
-        vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
-        m = m * m; m = m * m;
-        vec3 x = 2.0 * fract(p * C.www) - 1.0;
-        vec3 h = abs(x) - 0.5;
-        vec3 ox = floor(x + 0.5);
-        vec3 a0 = x - ox;
-        m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
-        vec3 g;
-        g.x = a0.x * x0.x + h.x * x0.y;
-        g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-        return 130.0 * dot(m, g);
-      }
-
-      void main() {
-        // Discard pixels above the liquid surface
-        if (vUv.y > uFillLevel + 0.005) discard;
-
-        // Normalized depth within the liquid (0 = bottom, 1 = surface)
-        float depth = clamp(vUv.y / max(uFillLevel, 0.001), 0.0, 1.0);
-
-        // --- Beer color with realistic depth absorption ---
-        // Beer absorbs blue/green light, transmits amber/red
-        vec3 deepBeer   = vec3(0.28, 0.12, 0.01);  // dark, almost opaque at depth
-        vec3 midBeer    = vec3(0.62, 0.28, 0.04);   // rich amber
-        vec3 brightBeer = vec3(0.85, 0.52, 0.08);   // bright where light passes through
-        vec3 surfaceBeer = vec3(0.95, 0.68, 0.12);  // golden at surface where thinnest
-
-        vec3 beerColor = mix(deepBeer, midBeer, smoothstep(0.0, 0.35, depth));
-        beerColor = mix(beerColor, brightBeer, smoothstep(0.35, 0.75, depth));
-        beerColor = mix(beerColor, surfaceBeer, smoothstep(0.75, 1.0, depth));
-
-        // --- Caustic light patterns (light refracting through liquid) ---
-        vec2 causticUv = vUv * vec2(8.0, 6.0);
-        float c1 = snoise(causticUv + vec2(uTime * 0.15, uTime * 0.1));
-        float c2 = snoise(causticUv * 1.8 + vec2(-uTime * 0.12, uTime * 0.18));
-        float c3 = snoise(causticUv * 3.2 + vec2(uTime * 0.08, -uTime * 0.06));
-        float caustics = (c1 * c2 + c3 * 0.5) * 0.5 + 0.5;
-        caustics = pow(caustics, 2.5); // sharpen the bright spots
-        // Caustics are strongest in the mid-range (light penetrates but still scatters)
-        float causticStrength = smoothstep(0.15, 0.5, depth) * smoothstep(1.0, 0.6, depth);
-        beerColor += vec3(0.12, 0.07, 0.01) * caustics * causticStrength;
-
-        // --- Subsurface scattering glow ---
-        // Light entering from above creates a warm glow near the surface
-        float sssGlow = smoothstep(0.5, 1.0, depth);
-        float sssPattern = snoise(vUv * vec2(4.0, 3.0) + uTime * 0.05) * 0.5 + 0.5;
-        beerColor += vec3(0.08, 0.04, 0.0) * sssGlow * sssPattern;
-
-        // --- Internal convection currents ---
-        // Slow-moving large-scale patterns like heat convection in liquid
-        vec2 convUv = vUv * vec2(3.0, 5.0);
-        float conv = snoise(convUv + vec2(uTime * 0.03, uTime * 0.06));
-        conv = conv * 0.5 + 0.5;
-        beerColor += vec3(0.04, 0.02, 0.0) * conv * smoothstep(0.0, 0.5, depth);
-
-        // --- Specular highlight at the surface (Fresnel-like) ---
-        float surfaceEdge = smoothstep(uFillLevel - 0.015, uFillLevel, vUv.y);
-        float specNoise = snoise(vec2(vUv.x * 20.0 + uTime * 0.5, uTime * 0.3));
-        float specular = surfaceEdge * (0.6 + 0.4 * specNoise);
-        vec3 specColor = vec3(1.0, 0.92, 0.7);
-        beerColor = mix(beerColor, specColor, specular * 0.35);
-
-        // --- Meniscus darkening at edges ---
-        float edgeDark = 1.0 - smoothstep(0.3, 0.5, abs(vUv.x - 0.5) * 2.0);
-        beerColor *= 0.85 + 0.15 * edgeDark;
-
-        // --- Opacity: beer is not fully opaque, light passes through ---
-        // Thicker at depth, more translucent near surface
-        float alpha = 0.75 + 0.25 * (1.0 - depth);
-        // Soft fade at the very bottom edge
-        alpha *= smoothstep(0.0, 0.03, vUv.y);
-        // Slight variation for visual depth
-        alpha *= 0.92 + 0.08 * snoise(vUv * 10.0 + uTime * 0.1);
-
-        gl_FragColor = vec4(beerColor, alpha);
-      }
-    `;
-
-    const liquidUniforms = {
-      uTime: { value: 0 },
-      uFillLevel: { value: 0.0 },
-      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
-    };
-
-    const liquidMaterial = new THREE.ShaderMaterial({
-      vertexShader: liquidVertexShader,
-      fragmentShader: liquidFragmentShader,
-      uniforms: liquidUniforms,
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false
+    // ---- Water ----
+    const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+    const water = new Water(waterGeometry, {
+      textureWidth: 512,
+      textureHeight: 512,
+      waterNormals: new THREE.TextureLoader().load(
+        'textures/waternormals.jpg',
+        function (texture) { texture.wrapS = texture.wrapT = THREE.RepeatWrapping; }
+      ),
+      sunDirection: new THREE.Vector3(),
+      sunColor: 0xffffff,
+      waterColor: 0x001e0f,
+      distortionScale: 3.7,
+      fog: scene.fog !== undefined,
     });
+    water.rotation.x = -Math.PI / 2;
+    scene.add(water);
 
-    // Liquid plane — high-res mesh for smooth waves
-    const planeWidth = window.innerWidth + 100;
-    const planeHeight = window.innerHeight + 100;
-    const liquidGeometry = new THREE.PlaneGeometry(planeWidth, planeHeight, 200, 100);
-    const liquidMesh = new THREE.Mesh(liquidGeometry, liquidMaterial);
-    liquidMesh.position.set(0, -planeHeight / 2, 0);
-    scene.add(liquidMesh);
+    // ---- Sky ----
+    const sky = new Sky();
+    sky.scale.setScalar(10000);
+    scene.add(sky);
+
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms['turbidity'].value = 10;
+    skyUniforms['rayleigh'].value = 2;
+    skyUniforms['mieCoefficient'].value = 0.005;
+    skyUniforms['mieDirectionalG'].value = 0.8;
+
+    // ---- Sun + Environment Map ----
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const sceneEnv = new THREE.Scene();
+    let renderTarget;
+
+    function updateSun() {
+      const phi = THREE.MathUtils.degToRad(90 - 2);
+      const theta = THREE.MathUtils.degToRad(180);
+      sun.setFromSphericalCoords(1, phi, theta);
+
+      sky.material.uniforms['sunPosition'].value.copy(sun);
+      water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+
+      if (renderTarget !== undefined) renderTarget.dispose();
+
+      sceneEnv.add(sky);
+      renderTarget = pmremGenerator.fromScene(sceneEnv);
+      scene.add(sky);
+
+      scene.environment = renderTarget.texture;
+    }
+
+    updateSun();
+
+
+    // ---- Visibility ----
+    let isVisible = true;
+    const observer = new IntersectionObserver(
+      (entries) => { isVisible = entries[0].isIntersecting; },
+      { threshold: 0 }
+    );
+    observer.observe(canvas);
 
     // ---- Animation ----
-    const FILL_DURATION = 4.5;
-    const FILL_TARGET = 0.70;
-    let startTime = null;
-    let fillComplete = false;
-
-    function animate(timestamp) {
+    function animate() {
       requestAnimationFrame(animate);
+      if (!isVisible) return;
 
-      if (startTime === null) startTime = timestamp;
-      const elapsed = (timestamp - startTime) / 1000;
-
-      if (!fillComplete) {
-        const progress = Math.min(elapsed / FILL_DURATION, 1.0);
-        liquidUniforms.uFillLevel.value = easeOutQuad(progress) * FILL_TARGET;
-        if (progress >= 1.0) fillComplete = true;
-      } else {
-        // Gentle breathing motion after fill
-        const breathe = Math.sin(elapsed * 0.25) * 0.004;
-        liquidUniforms.uFillLevel.value = FILL_TARGET + breathe;
-      }
-
-      liquidUniforms.uTime.value = elapsed;
+      water.material.uniforms['time'].value += 0.3 / 60.0;
       renderer.render(scene, camera);
     }
 
     requestAnimationFrame(animate);
 
     // ---- Resize ----
-    function handleResize() {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      renderer.setSize(w, h);
-      camera.left = -w / 2;
-      camera.right = w / 2;
-      camera.top = h / 2;
-      camera.bottom = -h / 2;
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
-      liquidUniforms.uResolution.value.set(w, h);
-    }
-
-    window.addEventListener('resize', handleResize);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
 
     // ---- Copy to clipboard ----
     const installBlock = document.getElementById('install-block');
