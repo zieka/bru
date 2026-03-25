@@ -192,9 +192,10 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     extract_timer.stop();
     defer allocator.free(keg_path);
 
-    // 9. Replace placeholders.
+    // 9. Replace placeholders in text files and Mach-O binaries.
     var placeholders_timer = Timer.start(&trace, "placeholders");
     try bottle.replacePlaceholders(keg_path);
+    try bottle.relocateMachO(keg_path);
     placeholders_timer.stop();
 
     // 10. Build runtime_dependencies from the formula's dependency list.

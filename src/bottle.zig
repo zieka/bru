@@ -499,6 +499,178 @@ pub const Bottle = struct {
 
         self.allocator.free(current);
     }
+
+    /// Relocate Mach-O binaries by replacing @@HOMEBREW_*@@ placeholders in
+    /// load commands using install_name_tool. Required on macOS because
+    /// Homebrew bottles embed placeholder paths in binary load commands that
+    /// the text-only replacePlaceholders cannot handle.
+    pub fn relocateMachO(self: Bottle, keg_path: []const u8) !void {
+        const builtin = @import("builtin");
+        if (comptime builtin.os.tag != .macos) return;
+
+        var dir = try fs.openDirAbsolute(keg_path, .{});
+        defer dir.close();
+
+        var walker = try dir.walk(self.allocator);
+        defer walker.deinit();
+
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file) continue;
+            self.relocateFileIfMachO(dir, keg_path, entry.path) catch continue;
+        }
+    }
+
+    /// Check if 4-byte magic indicates a Mach-O binary.
+    fn isMachOMagic(magic: *const [4]u8) bool {
+        const m = mem.readInt(u32, magic, .big);
+        return switch (m) {
+            0xFEEDFACE, 0xFEEDFACF, // big-endian 32/64-bit
+            0xCEFAEDFE, 0xCFFAEDFE, // little-endian 32/64-bit
+            0xCAFEBABE, // universal/fat binary
+            => true,
+            else => false,
+        };
+    }
+
+    /// Inspect a single file; if it is a Mach-O binary with @@HOMEBREW_*@@
+    /// placeholders in its load commands, rewrite them with install_name_tool
+    /// and re-sign.
+    fn relocateFileIfMachO(self: Bottle, dir: fs.Dir, keg_path: []const u8, sub_path: []const u8) !void {
+        // Read first 4 bytes to check Mach-O magic.
+        var magic: [4]u8 = undefined;
+        {
+            var file = dir.openFile(sub_path, .{}) catch return;
+            defer file.close();
+            var read_buf: [16]u8 = undefined;
+            var reader = file.reader(&read_buf);
+            reader.interface.readSliceAll(&magic) catch return;
+        }
+        if (!isMachOMagic(&magic)) return;
+
+        // Build absolute path.
+        const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ keg_path, sub_path });
+        defer self.allocator.free(full_path);
+
+        // Run otool -D to get dylib ID and otool -L to get linked libraries.
+        const otool_d = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "otool", "-D", full_path },
+        }) catch return;
+        defer self.allocator.free(otool_d.stdout);
+        defer self.allocator.free(otool_d.stderr);
+
+        const otool_l = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "otool", "-L", full_path },
+        }) catch return;
+        defer self.allocator.free(otool_l.stdout);
+        defer self.allocator.free(otool_l.stderr);
+
+        // Collect install_name_tool arguments.
+        var args = std.ArrayList([]const u8){};
+        defer {
+            // Free all allocated arg strings (skip argv[0] = literal).
+            for (args.items) |arg| {
+                if (isPlaceholderAllocated(arg)) self.allocator.free(arg);
+            }
+            args.deinit(self.allocator);
+        }
+
+        try args.append(self.allocator, "install_name_tool");
+        var has_changes = false;
+
+        // Parse otool -D output for dylib ID with placeholder.
+        {
+            var lines = mem.splitScalar(u8, otool_d.stdout, '\n');
+            _ = lines.next(); // skip filename line
+            if (lines.next()) |id_line| {
+                const trimmed = mem.trim(u8, id_line, " \t");
+                if (hasPlaceholder(trimmed)) {
+                    const new_id = try self.replacePlaceholderPath(trimmed);
+                    try args.append(self.allocator, "-id");
+                    try args.append(self.allocator, new_id);
+                    has_changes = true;
+                }
+            }
+        }
+
+        // Parse otool -L output for linked libraries with placeholders.
+        {
+            var lines = mem.splitScalar(u8, otool_l.stdout, '\n');
+            while (lines.next()) |line| {
+                const trimmed = mem.trim(u8, line, " \t");
+                if (!hasPlaceholder(trimmed)) continue;
+
+                // Extract path: everything before " (compatibility".
+                const end = mem.indexOf(u8, trimmed, " (") orelse continue;
+                const old_path = trimmed[0..end];
+
+                const new_path = try self.replacePlaceholderPath(old_path);
+
+                try args.append(self.allocator, "-change");
+                try args.append(self.allocator, try self.allocator.dupe(u8, old_path));
+                try args.append(self.allocator, new_path);
+                has_changes = true;
+            }
+        }
+
+        if (!has_changes) return;
+
+        try args.append(self.allocator, try self.allocator.dupe(u8, full_path));
+
+        // Run install_name_tool.
+        const int_result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = args.items,
+        }) catch return;
+        self.allocator.free(int_result.stdout);
+        self.allocator.free(int_result.stderr);
+
+        // Re-sign with ad-hoc signature (required on Apple Silicon).
+        const cs_result = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "codesign", "--force", "--sign", "-", full_path },
+        }) catch return;
+        self.allocator.free(cs_result.stdout);
+        self.allocator.free(cs_result.stderr);
+    }
+
+    fn hasPlaceholder(s: []const u8) bool {
+        return mem.indexOf(u8, s, "@@HOMEBREW_CELLAR@@") != null or
+            mem.indexOf(u8, s, "@@HOMEBREW_PREFIX@@") != null;
+    }
+
+    /// Check if a string was heap-allocated (not a string literal from argv).
+    /// We know literals are "install_name_tool", "-id", "-change"; everything
+    /// else was allocated.
+    fn isPlaceholderAllocated(s: []const u8) bool {
+        return !mem.eql(u8, s, "install_name_tool") and
+            !mem.eql(u8, s, "-id") and
+            !mem.eql(u8, s, "-change");
+    }
+
+    /// Replace @@HOMEBREW_CELLAR@@ and @@HOMEBREW_PREFIX@@ in a path string.
+    /// Caller owns the returned string.
+    fn replacePlaceholderPath(self: Bottle, path: []const u8) ![]const u8 {
+        var current = try self.allocator.dupe(u8, path);
+
+        const placeholders = [_]struct { needle: []const u8, replacement: []const u8 }{
+            .{ .needle = "@@HOMEBREW_CELLAR@@", .replacement = self.cellar },
+            .{ .needle = "@@HOMEBREW_PREFIX@@", .replacement = self.prefix },
+        };
+
+        for (placeholders) |ph| {
+            const count = mem.count(u8, current, ph.needle);
+            if (count == 0) continue;
+            const new_len = current.len - (ph.needle.len * count) + (ph.replacement.len * count);
+            const new_buf = try self.allocator.alloc(u8, new_len);
+            _ = mem.replace(u8, current, ph.needle, ph.replacement, new_buf);
+            self.allocator.free(current);
+            current = new_buf;
+        }
+
+        return current;
+    }
 };
 
 // ---------------------------------------------------------------------------
