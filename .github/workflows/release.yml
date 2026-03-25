@@ -16,13 +16,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
-            arch: aarch64
+          - target: aarch64-macos
             name: darwin-aarch64
-          - os: macos-13
-            arch: x86_64
+          - target: x86_64-macos
             name: darwin-x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -31,10 +29,11 @@ jobs:
           version: 0.15.2
 
       - name: Run tests
+        if: matrix.target == 'aarch64-macos'
         run: zig build test
 
       - name: Build release binary
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       - name: Rename binary
         run: mv zig-out/bin/bru bru-${{ matrix.name }}
