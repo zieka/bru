@@ -4,6 +4,7 @@ const Config = @import("config.zig").Config;
 const dispatch = @import("dispatch.zig");
 const fallback = @import("fallback.zig");
 const help = @import("help.zig");
+const version_info = @import("version_info.zig");
 
 pub fn main() !void {
     // Release builds: arena allocator with thread-safe wrapper. Every alloc()
@@ -57,7 +58,7 @@ fn run(allocator: std.mem.Allocator) !void {
 
     // --version: print version and exit.
     if (parsed.version) {
-        try stdout.print("bru 0.1.0\n", .{});
+        try stdout.print("bru {s}\n", .{version_info.version});
         try stdout.flush();
         return;
     }
@@ -149,4 +150,5 @@ test {
     _ = @import("clonefile.zig");
     _ = @import("tap_migrations.zig");
     _ = @import("state.zig");
+    _ = @import("version_info.zig");
 }
