@@ -28,18 +28,47 @@ pub const FormulaInfo = struct {
 
 /// Returns the Homebrew bottle platform tag for the current compilation target.
 pub fn currentPlatformTag() []const u8 {
+    return platformFallbackTags()[0];
+}
+
+/// Returns an ordered list of Homebrew bottle platform tags to try for the
+/// current compilation target. Includes older macOS versions and "all" as
+/// fallbacks for formulae that haven't been rebuilt yet or are
+/// platform-independent (e.g. shell completions).
+pub fn platformFallbackTags() []const []const u8 {
     const arch = @import("builtin").target.cpu.arch;
     const os = @import("builtin").target.os.tag;
 
     if (os == .macos) {
-        if (arch == .aarch64) return "arm64_sequoia";
-        if (arch == .x86_64) return "sequoia";
+        if (arch == .aarch64) return &.{
+            "arm64_sequoia",
+            "arm64_sonoma",
+            "arm64_ventura",
+            "arm64_monterey",
+            "arm64_big_sur",
+            "all",
+        };
+        if (arch == .x86_64) return &.{
+            "sequoia",
+            "sonoma",
+            "ventura",
+            "monterey",
+            "big_sur",
+            "catalina",
+            "all",
+        };
     }
     if (os == .linux) {
-        if (arch == .aarch64) return "arm64_linux";
-        if (arch == .x86_64) return "x86_64_linux";
+        if (arch == .aarch64) return &.{
+            "arm64_linux",
+            "all",
+        };
+        if (arch == .x86_64) return &.{
+            "x86_64_linux",
+            "all",
+        };
     }
-    return "unknown";
+    return &.{"all"};
 }
 
 /// Parse a JSON array of formula objects into a slice of FormulaInfo.
@@ -63,7 +92,7 @@ pub fn parseFormulaJson(allocator: Allocator, json_bytes: []const u8) ![]Formula
         result.deinit(allocator);
     }
 
-    const platform = currentPlatformTag();
+    const platform_tags = platformFallbackTags();
 
     for (arr.items) |item| {
         const obj = switch (item) {
@@ -71,7 +100,7 @@ pub fn parseFormulaJson(allocator: Allocator, json_bytes: []const u8) ![]Formula
             else => continue,
         };
 
-        const info = parseOneFormula(allocator, obj, platform) catch continue;
+        const info = parseOneFormula(allocator, obj, platform_tags) catch continue;
         result.appendAssumeCapacity(info);
     }
 
@@ -79,7 +108,7 @@ pub fn parseFormulaJson(allocator: Allocator, json_bytes: []const u8) ![]Formula
 }
 
 /// Parse a single formula JSON object into a FormulaInfo.
-fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []const u8) !FormulaInfo {
+fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform_tags: []const []const u8) !FormulaInfo {
     const name = try allocator.dupe(u8, jsonStr(obj, "name") orelse return error.MissingField);
     errdefer allocator.free(name);
 
@@ -159,19 +188,24 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform: []co
                         bottle_root_url = try allocator.dupe(u8, url);
                     }
 
-                    // files.{platform}
+                    // files.{platform} — try each platform tag in priority order;
+                    // first match wins. This handles platform-independent bottles
+                    // (tagged "all") and older macOS version fallbacks.
                     if (stable_obj.get("files")) |files_val| {
                         if (asObject(files_val)) |files_obj| {
-                            if (files_obj.get(platform)) |plat_val| {
-                                if (asObject(plat_val)) |plat_obj| {
-                                    if (jsonStr(plat_obj, "sha256")) |sha| {
-                                        allocator.free(bottle_sha256);
-                                        bottle_sha256 = try allocator.dupe(u8, sha);
+                            for (platform_tags) |tag| {
+                                if (files_obj.get(tag)) |plat_val| {
+                                    if (asObject(plat_val)) |plat_obj| {
+                                        if (jsonStr(plat_obj, "sha256")) |sha| {
+                                            allocator.free(bottle_sha256);
+                                            bottle_sha256 = try allocator.dupe(u8, sha);
+                                        }
+                                        if (jsonStr(plat_obj, "cellar")) |cel| {
+                                            allocator.free(bottle_cellar);
+                                            bottle_cellar = try allocator.dupe(u8, cel);
+                                        }
                                     }
-                                    if (jsonStr(plat_obj, "cellar")) |cel| {
-                                        allocator.free(bottle_cellar);
-                                        bottle_cellar = try allocator.dupe(u8, cel);
-                                    }
+                                    break;
                                 }
                             }
                         }
@@ -465,4 +499,55 @@ test "parseFormulaJson parses oldnames and replacement" {
     try std.testing.expectEqual(@as(usize, 1), formulae[0].oldnames.len);
     try std.testing.expectEqualStrings("gnome-icon-theme", formulae[0].oldnames[0]);
     try std.testing.expectEqualStrings("", formulae[0].deprecation_replacement);
+}
+
+test "parseFormulaJson resolves platform-independent 'all' bottles" {
+    const allocator = std.testing.allocator;
+
+    // Simulates a formula (like shell completions) that only has an "all" bottle.
+    const json_bytes =
+        \\[{
+        \\  "name": "thesinator-completion",
+        \\  "full_name": "thesinator-completion",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "Shell completions for thesinator",
+        \\  "homepage": "https://example.com",
+        \\  "license": "MIT",
+        \\  "versions": {"stable": "1.2.7", "head": null},
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "deprecated": false,
+        \\  "disabled": false,
+        \\  "caveats": null,
+        \\  "dependencies": [],
+        \\  "build_dependencies": [],
+        \\  "oldnames": [],
+        \\  "deprecation_replacement_formula": null,
+        \\  "bottle": {
+        \\    "stable": {
+        \\      "root_url": "https://ghcr.io/v2/homebrew/core",
+        \\      "files": {
+        \\        "all": {
+        \\          "cellar": ":any_skip_relocation",
+        \\          "sha256": "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+        \\        }
+        \\      }
+        \\    }
+        \\  }
+        \\}]
+    ;
+
+    const formulae = try parseFormulaJson(allocator, json_bytes);
+    defer {
+        for (formulae) |f| freeFormula(allocator, f);
+        allocator.free(formulae);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), formulae.len);
+    const f = formulae[0];
+    try std.testing.expectEqualStrings("thesinator-completion", f.name);
+    // Should have resolved the "all" bottle via fallback.
+    try std.testing.expectEqualStrings("https://ghcr.io/v2/homebrew/core", f.bottle_root_url);
+    try std.testing.expectEqualStrings("deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567", f.bottle_sha256);
+    try std.testing.expectEqualStrings(":any_skip_relocation", f.bottle_cellar);
 }
