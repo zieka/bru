@@ -26,7 +26,7 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     }
 
     // 2. If no formula name, print usage and exit(1).
-    const name = formula_name orelse {
+    const raw_name = formula_name orelse {
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
         const stderr = &ew.interface;
@@ -35,27 +35,40 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
         std.process.exit(1);
     };
 
+    // Extract simple name from tap-prefixed names (e.g. "user/tap/pkg" -> "pkg").
+    const name = if (std.mem.lastIndexOfScalar(u8, raw_name, '/')) |idx|
+        raw_name[idx + 1 ..]
+    else
+        raw_name;
+
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
 
-    // 3. Get installed versions via cellar.
+    // 3. Get installed versions — check cellar first, then caskroom.
     const cellar = Cellar.init(config.cellar);
-    const versions = cellar.installedVersions(allocator, name) orelse {
+    var base_path = config.cellar;
+    var versions = cellar.installedVersions(allocator, name);
+    if (versions == null) {
+        const caskroom = Cellar.init(config.caskroom);
+        versions = caskroom.installedVersions(allocator, name);
+        if (versions != null) base_path = config.caskroom;
+    }
+    const installed_versions = versions orelse {
         err_out.err("{s} is not installed.", .{name});
         std.process.exit(1);
     };
     defer {
-        for (versions) |v| allocator.free(v);
-        allocator.free(versions);
+        for (installed_versions) |v| allocator.free(v);
+        allocator.free(installed_versions);
     }
 
     // 4. Set up linker.
     var linker = Linker.init(allocator, config.prefix);
 
     // 5. For each version: unlink, then delete keg directory.
-    for (versions) |version| {
+    for (installed_versions) |version| {
         var keg_buf: [fs.max_path_bytes]u8 = undefined;
-        const keg_path = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ config.cellar, name, version }) catch continue;
+        const keg_path = std.fmt.bufPrint(&keg_buf, "{s}/{s}/{s}", .{ base_path, name, version }) catch continue;
 
         out.print("Uninstalling {s} {s}...\n", .{ name, version });
 
@@ -73,7 +86,7 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     // 6. Try to remove the formula directory if empty.
     {
         var formula_dir_buf: [fs.max_path_bytes]u8 = undefined;
-        const formula_dir = std.fmt.bufPrint(&formula_dir_buf, "{s}/{s}", .{ config.cellar, name }) catch "";
+        const formula_dir = std.fmt.bufPrint(&formula_dir_buf, "{s}/{s}", .{ base_path, name }) catch "";
         if (formula_dir.len > 0) {
             fs.deleteDirAbsolute(formula_dir) catch {};
         }
@@ -88,7 +101,7 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     {
         var state = @import("../state.zig").State.load(allocator);
         defer state.deinit();
-        state.recordAction("uninstall", name, versions[0], null) catch {};
+        state.recordAction("uninstall", name, installed_versions[0], null) catch {};
         state.save() catch {};
     }
 }
