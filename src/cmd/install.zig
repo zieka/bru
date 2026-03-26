@@ -12,6 +12,7 @@ const tab_mod = @import("../tab.zig");
 const Tab = tab_mod.Tab;
 const RuntimeDep = tab_mod.RuntimeDep;
 const Output = @import("../output.zig").Output;
+const fallback = @import("../fallback.zig");
 const fuzzy = @import("../fuzzy.zig");
 const timer_mod = @import("../timer.zig");
 const Timer = timer_mod.Timer;
@@ -54,6 +55,16 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         try stderr.flush();
         std.process.exit(1);
     };
+
+    // Tap-qualified names (e.g. "user/tap/formula") are not in the
+    // homebrew-core index — fall back to the real brew binary.
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        const full_argv = allocator.alloc([]const u8, args.len + 2) catch std.process.exit(1);
+        full_argv[0] = "bru";
+        full_argv[1] = "install";
+        @memcpy(full_argv[2..], args);
+        fallback.execBrew(allocator, full_argv);
+    }
 
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
