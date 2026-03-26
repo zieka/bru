@@ -233,9 +233,9 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         const dep_version = idx.getString(dep_entry.version_offset);
         const dep_revision = dep_entry.revision;
 
-        // Build pkg_version: "version" or "version_revision"
+        // Build dep_pkg_version: "version" or "version_revision"
         var dep_ver_buf: [256]u8 = undefined;
-        const pkg_version = if (dep_revision > 0)
+        const dep_pkg_version = if (dep_revision > 0)
             std.fmt.bufPrint(&dep_ver_buf, "{s}_{d}", .{ dep_version, dep_revision }) catch continue
         else
             dep_version;
@@ -246,7 +246,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         const version_str = try allocator.dupe(u8, dep_version);
         errdefer allocator.free(version_str);
 
-        const pkg_ver = try allocator.dupe(u8, pkg_version);
+        const pkg_ver = try allocator.dupe(u8, dep_pkg_version);
 
         runtime_deps.appendAssumeCapacity(.{
             .full_name = full_name,
