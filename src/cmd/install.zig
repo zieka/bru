@@ -234,9 +234,9 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         const dep_revision = dep_entry.revision;
 
         // Build pkg_version: "version" or "version_revision"
-        var pkg_ver_buf: [256]u8 = undefined;
+        var dep_ver_buf: [256]u8 = undefined;
         const pkg_version = if (dep_revision > 0)
-            std.fmt.bufPrint(&pkg_ver_buf, "{s}_{d}", .{ dep_version, dep_revision }) catch continue
+            std.fmt.bufPrint(&dep_ver_buf, "{s}_{d}", .{ dep_version, dep_revision }) catch continue
         else
             dep_version;
 
