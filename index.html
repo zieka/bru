@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bru — like brew, but native</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@1,400;1,700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg-section: #111111;
+      --surface: #1a1a1a;
+      --border: #2a2a2a;
+      --white: #ffffff;
+      --gray: #999999;
+      --gray-light: #bbbbbb;
+      --amber: #d4820a;
+      --amber-light: #e8a832;
+      --amber-glow: #c77b0a;
+    }
+
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--white);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ---- Hero ---- */
+    .hero {
+      position: relative;
+      width: 100%;
+      height: 100vh;
+      min-height: 600px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .hero::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 120px;
+      background: linear-gradient(transparent, var(--bg-section));
+      z-index: 5;
+      pointer-events: none;
+    }
+
+    canvas#brew-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 10;
+      text-align: center;
+      padding: 0 24px;
+      max-width: 640px;
+    }
+
+    .wordmark {
+      font-family: 'Newsreader', Georgia, 'Times New Roman', serif;
+      font-style: italic;
+      font-size: clamp(5rem, 12vw, 9rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      color: var(--white);
+      line-height: 1;
+      margin-bottom: 8px;
+      text-shadow: 0 2px 30px rgba(0, 0, 0, 0.6), 0 0 60px rgba(212, 130, 10, 0.15);
+    }
+
+    .tagline {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      font-size: clamp(0.85rem, 1.8vw, 1rem);
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 24px;
+      font-weight: 300;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
+    }
+
+    .install-block {
+      cursor: pointer;
+      max-width: 100%;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: none;
+      border: none;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 0;
+      padding: 0 0 6px 0;
+      transition: border-color 0.2s ease;
+    }
+
+    .install-block:hover {
+      border-color: rgba(255, 255, 255, 0.4);
+      box-shadow: none;
+    }
+
+    .install-cmd {
+      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', 'Courier New', monospace;
+      font-size: clamp(0.7rem, 1.3vw, 0.8rem);
+      color: rgba(255, 255, 255, 0.6);
+      white-space: nowrap;
+      overflow-x: auto;
+      max-width: 100%;
+      user-select: all;
+      letter-spacing: 0.02em;
+    }
+
+    .install-hint {
+      font-size: 0.65rem;
+      color: rgba(255, 255, 255, 0.25);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      transition: color 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .install-block.copied .install-hint {
+      color: var(--amber-light);
+    }
+
+    /* ---- Features ---- */
+    .features {
+      background: var(--bg-section);
+      padding: 100px 24px 120px;
+    }
+
+    .features-inner {
+      max-width: 600px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 32px;
+    }
+
+    .feature {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      font-size: clamp(0.8rem, 1.6vw, 0.95rem);
+      line-height: 1.7;
+      letter-spacing: 0.04em;
+      font-weight: 300;
+    }
+
+    .feature strong {
+      color: var(--white);
+      font-weight: 400;
+    }
+
+    .feature span {
+      color: rgba(255, 255, 255, 0.4);
+      font-weight: 300;
+    }
+
+    .github-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 48px;
+      font-size: 0.85rem;
+      color: rgba(255, 255, 255, 0.4);
+      text-decoration: none;
+      letter-spacing: 0.04em;
+      font-weight: 300;
+      transition: color 0.2s ease;
+    }
+
+    .github-link:hover {
+      color: var(--white);
+    }
+
+    .github-link svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
+    }
+
+    @media (max-width: 480px) {
+      .install-cmd {
+        font-size: 0.65rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <canvas id="brew-canvas"></canvas>
+    <div class="hero-content">
+      <h1 class="wordmark">bru</h1>
+      <p class="tagline">like brew, but native</p>
+      <div class="install-block" id="install-block" role="button" tabindex="0" aria-label="Click to copy install command">
+        <code class="install-cmd">curl -fsSL https://zieka.github.io/bru/install.sh | bash</code>
+        <span class="install-hint" id="install-hint">copy</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-inner">
+      <div class="feature">
+        <strong>Native speed</strong> <span>— written in Zig, no Ruby runtime</span>
+      </div>
+      <div class="feature">
+        <strong>Drop-in compatible</strong> <span>— falls back to brew for unsupported commands</span>
+      </div>
+      <div class="feature">
+        <strong>Built-in extras</strong> <span>— services, rollback, and bundle</span>
+      </div>
+      <div class="feature">
+        <strong>Single binary, zero dependencies</strong>
+      </div>
+      <a class="github-link" href="https://github.com/zieka/bru" target="_blank" rel="noopener"><svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
+    </div>
+  </section>
+
+  <script type="module">
+    import * as THREE from 'https://esm.sh/three@0.170.0';
+    import { Water } from 'https://esm.sh/three@0.170.0/examples/jsm/objects/Water.js';
+    import { Sky } from 'https://esm.sh/three@0.170.0/examples/jsm/objects/Sky.js';
+
+    // ---- Setup (matching Three.js ocean example) ----
+    const canvas = document.getElementById('brew-canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.1;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(
+      55, window.innerWidth / window.innerHeight, 1, 20000
+    );
+    camera.position.set(30, 30, 100);
+    camera.lookAt(0, 10, 0);
+
+    const sun = new THREE.Vector3();
+
+    // ---- Water ----
+    const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+    const water = new Water(waterGeometry, {
+      textureWidth: 512,
+      textureHeight: 512,
+      waterNormals: new THREE.TextureLoader().load(
+        'textures/waternormals.jpg',
+        function (texture) { texture.wrapS = texture.wrapT = THREE.RepeatWrapping; }
+      ),
+      sunDirection: new THREE.Vector3(),
+      sunColor: 0xffffff,
+      waterColor: 0x001e0f,
+      distortionScale: 3.7,
+      fog: scene.fog !== undefined,
+    });
+    water.rotation.x = -Math.PI / 2;
+    scene.add(water);
+
+    // ---- Sky ----
+    const sky = new Sky();
+    sky.scale.setScalar(10000);
+    scene.add(sky);
+
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms['turbidity'].value = 10;
+    skyUniforms['rayleigh'].value = 2;
+    skyUniforms['mieCoefficient'].value = 0.005;
+    skyUniforms['mieDirectionalG'].value = 0.8;
+
+    // ---- Sun + Environment Map ----
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const sceneEnv = new THREE.Scene();
+    let renderTarget;
+
+    function updateSun() {
+      const phi = THREE.MathUtils.degToRad(90 - 2);
+      const theta = THREE.MathUtils.degToRad(180);
+      sun.setFromSphericalCoords(1, phi, theta);
+
+      sky.material.uniforms['sunPosition'].value.copy(sun);
+      water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+
+      if (renderTarget !== undefined) renderTarget.dispose();
+
+      sceneEnv.add(sky);
+      renderTarget = pmremGenerator.fromScene(sceneEnv);
+      scene.add(sky);
+
+      scene.environment = renderTarget.texture;
+    }
+
+    updateSun();
+
+
+    // ---- Visibility ----
+    let isVisible = true;
+    const observer = new IntersectionObserver(
+      (entries) => { isVisible = entries[0].isIntersecting; },
+      { threshold: 0 }
+    );
+    observer.observe(canvas);
+
+    // ---- Animation ----
+    function animate() {
+      requestAnimationFrame(animate);
+      if (!isVisible) return;
+
+      water.material.uniforms['time'].value += 0.3 / 60.0;
+      renderer.render(scene, camera);
+    }
+
+    requestAnimationFrame(animate);
+
+    // ---- Resize ----
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // ---- Copy to clipboard ----
+    const installBlock = document.getElementById('install-block');
+    const installHint = document.getElementById('install-hint');
+    const cmd = 'curl -fsSL https://zieka.github.io/bru/install.sh | bash';
+
+    function handleCopy() {
+      navigator.clipboard.writeText(cmd).then(() => {
+        installHint.textContent = 'Copied!';
+        installBlock.classList.add('copied');
+        setTimeout(() => {
+          installHint.textContent = 'Click to copy';
+          installBlock.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    installBlock.addEventListener('click', handleCopy);
+    installBlock.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleCopy();
+      }
+    });
+  </script>
+</body>
+</html>
