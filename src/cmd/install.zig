@@ -166,11 +166,16 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
         return error.BottleNotAvailable;
     }
 
-    // 5. Get version from index.
+    // 5. Get version from index; include revision suffix when present.
     const version = idx.getString(entry.version_offset);
+    var pkg_ver_buf: [256]u8 = undefined;
+    const pkg_version = if (entry.revision > 0)
+        std.fmt.bufPrint(&pkg_ver_buf, "{s}_{d}", .{ version, entry.revision }) catch version
+    else
+        version;
 
     // 6. Print section header.
-    const install_title = try std.fmt.allocPrint(allocator, "Installing {s} {s}", .{ name, version });
+    const install_title = try std.fmt.allocPrint(allocator, "Installing {s} {s}", .{ name, pkg_version });
     defer allocator.free(install_title);
     out.section(install_title);
 
@@ -191,7 +196,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     defer allocator.free(archive_path);
 
     // 8. Extract bottle.
-    out.print("Pouring {s} {s}...\n", .{ name, version });
+    out.print("Pouring {s} {s}...\n", .{ name, pkg_version });
 
     var bottle = Bottle.init(allocator, config);
 
@@ -199,7 +204,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     defer allocator.free(keg_cache_dir);
 
     var extract_timer = Timer.start(&trace, "extract");
-    const keg_path = try bottle.pourWithCache(archive_path, name, version, bottle_sha256, keg_cache_dir);
+    const keg_path = try bottle.pourWithCache(archive_path, name, pkg_version, bottle_sha256, keg_cache_dir);
     extract_timer.stop();
     defer allocator.free(keg_path);
 
@@ -289,7 +294,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     trace.writeTraceFile("bru-trace.json");
 
     // 13. Print completion.
-    const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ name, version });
+    const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ name, pkg_version });
     defer allocator.free(done_title);
     out.section(done_title);
 
@@ -297,7 +302,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
     {
         var state = @import("../state.zig").State.load(allocator);
         defer state.deinit();
-        state.recordAction("install", name, version, null) catch {};
+        state.recordAction("install", name, pkg_version, null) catch {};
         state.save() catch {};
     }
 }
