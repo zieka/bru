@@ -9,14 +9,14 @@ const log = @import("log.zig");
 const fuzzy = @import("../fuzzy.zig");
 
 const ParsedCatArgs = struct {
-    package_name: ?[]const u8,
+    package_names: std.ArrayList([]const u8),
     force_formula: bool,
     force_cask: bool,
 };
 
-fn parseCatArgs(args: []const []const u8) ParsedCatArgs {
+fn parseCatArgs(allocator: Allocator, args: []const []const u8) ParsedCatArgs {
     var result = ParsedCatArgs{
-        .package_name = null,
+        .package_names = std.ArrayList([]const u8).init(allocator),
         .force_formula = false,
         .force_cask = false,
     };
@@ -26,7 +26,7 @@ fn parseCatArgs(args: []const []const u8) ParsedCatArgs {
         } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             result.force_cask = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (result.package_name == null) result.package_name = arg;
+            result.package_names.append(arg) catch {};
         }
     }
     return result;
@@ -39,42 +39,53 @@ fn parseCatArgs(args: []const []const u8) ParsedCatArgs {
 /// Looks up the package in the formula/cask index, then reads the .rb source
 /// from the local tap directory or fetches it from GitHub.
 pub fn catCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
-    const parsed = parseCatArgs(args);
+    var parsed = parseCatArgs(allocator, args);
+    defer parsed.package_names.deinit();
 
-    if (parsed.package_name == null) {
+    if (parsed.package_names.items.len == 0) {
         const err_out = Output.initErr(config.no_color);
         err_out.err("This command requires a formula or cask argument.", .{});
         std.process.exit(1);
     }
 
-    const the_name = parsed.package_name.?;
+    var had_error = false;
 
-    // Try formula first (unless --cask was specified).
-    if (!parsed.force_cask) {
-        if (tryFormulaCat(allocator, the_name, config)) return;
+    for (parsed.package_names.items) |the_name| {
+        var found = false;
+
+        // Try formula first (unless --cask was specified).
+        if (!parsed.force_cask) {
+            if (tryFormulaCat(allocator, the_name, config)) {
+                found = true;
+            }
+        }
+
+        if (!found) {
+            // Try cask (unless --formula was specified).
+            if (!parsed.force_formula) {
+                if (tryCaskCat(allocator, the_name, config)) {
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) {
+            // Nothing found: error with suggestions.
+            had_error = true;
+            const err_out = Output.initErr(config.no_color);
+            err_out.err("No available formula or cask with the name \"{s}\".", .{the_name});
+
+            var idx = Index.loadOrBuild(allocator, config.cache) catch continue;
+            const similar = fuzzy.findSimilar(&idx, allocator, the_name, 3, 3) catch &.{};
+            defer if (similar.len > 0) allocator.free(similar);
+            if (similar.len > 0) {
+                err_out.print("Did you mean?\n", .{});
+                for (similar) |s| err_out.print("  {s}\n", .{s});
+            }
+        }
     }
 
-    // Try cask (unless --formula was specified).
-    if (!parsed.force_formula) {
-        if (tryCaskCat(allocator, the_name, config)) return;
-    }
-
-    // Nothing found: error with suggestions.
-    var idx = Index.loadOrBuild(allocator, config.cache) catch {
-        const err_out = Output.initErr(config.no_color);
-        err_out.err("No available formula or cask with the name \"{s}\".", .{the_name});
-        std.process.exit(1);
-    };
-
-    const err_out = Output.initErr(config.no_color);
-    err_out.err("No available formula or cask with the name \"{s}\".", .{the_name});
-    const similar = fuzzy.findSimilar(&idx, allocator, the_name, 3, 3) catch &.{};
-    defer if (similar.len > 0) allocator.free(similar);
-    if (similar.len > 0) {
-        err_out.print("Did you mean?\n", .{});
-        for (similar) |s| err_out.print("  {s}\n", .{s});
-    }
-    std.process.exit(1);
+    if (had_error) std.process.exit(1);
 }
 
 /// Try to display the source for a formula. Returns true if found.
@@ -191,38 +202,59 @@ test "catCmd compiles and has correct signature" {
 
 test "parseCatArgs extracts package name" {
     const args = &[_][]const u8{"wget"};
-    const parsed = parseCatArgs(args);
-    try std.testing.expectEqualStrings("wget", parsed.package_name.?);
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.package_names.items[0]);
     try std.testing.expect(!parsed.force_formula);
     try std.testing.expect(!parsed.force_cask);
 }
 
 test "parseCatArgs with --formula flag" {
     const args = &[_][]const u8{ "--formula", "git" };
-    const parsed = parseCatArgs(args);
-    try std.testing.expectEqualStrings("git", parsed.package_name.?);
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
+    try std.testing.expectEqualStrings("git", parsed.package_names.items[0]);
     try std.testing.expect(parsed.force_formula);
     try std.testing.expect(!parsed.force_cask);
 }
 
 test "parseCatArgs with --cask flag" {
     const args = &[_][]const u8{ "--cask", "firefox" };
-    const parsed = parseCatArgs(args);
-    try std.testing.expectEqualStrings("firefox", parsed.package_name.?);
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
+    try std.testing.expectEqualStrings("firefox", parsed.package_names.items[0]);
     try std.testing.expect(!parsed.force_formula);
     try std.testing.expect(parsed.force_cask);
 }
 
 test "parseCatArgs no arguments" {
     const args = &[_][]const u8{};
-    const parsed = parseCatArgs(args);
-    try std.testing.expect(parsed.package_name == null);
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.package_names.items.len);
 }
 
 test "parseCatArgs skips unknown flags" {
     const args = &[_][]const u8{ "--verbose", "jq" };
-    const parsed = parseCatArgs(args);
-    try std.testing.expectEqualStrings("jq", parsed.package_name.?);
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
+    try std.testing.expectEqualStrings("jq", parsed.package_names.items[0]);
+}
+
+test "parseCatArgs collects multiple package names" {
+    const args = &[_][]const u8{ "wget", "curl", "--formula", "jq" };
+    var parsed = parseCatArgs(std.testing.allocator, args);
+    defer parsed.package_names.deinit();
+    try std.testing.expectEqual(@as(usize, 3), parsed.package_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.package_names.items[0]);
+    try std.testing.expectEqualStrings("curl", parsed.package_names.items[1]);
+    try std.testing.expectEqualStrings("jq", parsed.package_names.items[2]);
+    try std.testing.expect(parsed.force_formula);
+    try std.testing.expect(!parsed.force_cask);
 }
 
 test "readAndPrintFile returns false for nonexistent file" {

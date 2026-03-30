@@ -204,17 +204,28 @@ fn cleanupWorker(ctx: CleanupContext) void {
 /// Usage:
 ///   bru upgrade              — upgrade all outdated formulae
 ///   bru upgrade <formula>    — upgrade a specific formula
+const ParsedUpgradeArgs = struct {
+    formula_names: std.ArrayList([]const u8),
+};
+
+fn parseUpgradeArgs(allocator: Allocator, args: []const []const u8) ParsedUpgradeArgs {
+    var result = ParsedUpgradeArgs{
+        .formula_names = std.ArrayList([]const u8).init(allocator),
+    };
+    for (args) |arg| {
+        if (arg.len > 0 and arg[0] == '-') continue;
+        result.formula_names.append(arg) catch {};
+    }
+    return result;
+}
+
 pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
 
-    // Parse args — find the first non-flag argument as formula name.
-    var formula_name: ?[]const u8 = null;
-    for (args) |arg| {
-        if (arg.len > 0 and arg[0] == '-') continue;
-        formula_name = arg;
-        break;
-    }
+    // Parse args — collect all non-flag arguments as formula names.
+    var parsed = parseUpgradeArgs(allocator, args);
+    defer parsed.formula_names.deinit();
 
     // Load index.
     var index = try Index.loadOrBuild(allocator, config.cache);
@@ -236,46 +247,47 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
         to_upgrade.deinit(allocator);
     }
 
-    if (formula_name) |name| {
-        // Specific formula requested — check if installed and outdated.
-        if (!cellar.isInstalled(name)) {
-            err_out.err("{s} is not installed.", .{name});
-            std.process.exit(1);
-        }
+    if (parsed.formula_names.items.len > 0) {
+        // Specific formulae requested — check each if installed and outdated.
+        for (parsed.formula_names.items) |name| {
+            if (!cellar.isInstalled(name)) {
+                err_out.err("{s} is not installed.", .{name});
+                continue;
+            }
 
-        const entry = index.lookup(name) orelse {
-            err_out.err("No available formula with the name \"{s}\".", .{name});
-            err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
-            std.process.exit(1);
-        };
+            const entry = index.lookup(name) orelse {
+                err_out.err("No available formula with the name \"{s}\".", .{name});
+                err_out.print("Searched: {s}/api/formula.jws.json\n", .{config.cache});
+                continue;
+            };
 
-        const installed_versions = cellar.installedVersions(allocator, name) orelse {
-            err_out.err("{s} is not installed.", .{name});
-            std.process.exit(1);
-        };
-        defer {
-            for (installed_versions) |v| allocator.free(v);
-            allocator.free(installed_versions);
-        }
+            const installed_versions = cellar.installedVersions(allocator, name) orelse {
+                err_out.err("{s} is not installed.", .{name});
+                continue;
+            };
+            defer {
+                for (installed_versions) |v| allocator.free(v);
+                allocator.free(installed_versions);
+            }
 
-        const installed_latest = installed_versions[installed_versions.len - 1];
-        const installed_pv = PkgVersion.parse(installed_latest);
-        const index_pv = PkgVersion{
-            .version = index.getString(entry.version_offset),
-            .revision = @as(u32, entry.revision),
-        };
+            const installed_latest = installed_versions[installed_versions.len - 1];
+            const installed_pv = PkgVersion.parse(installed_latest);
+            const index_pv = PkgVersion{
+                .version = index.getString(entry.version_offset),
+                .revision = @as(u32, entry.revision),
+            };
 
-        if (installed_pv.order(index_pv) == .lt) {
-            try to_upgrade.append(allocator, .{
-                .name = try allocator.dupe(u8, name),
-                .installed_version = try allocator.dupe(u8, installed_latest),
-                .index_version = index_pv,
-            });
-        } else {
-            var fmt_buf: [128]u8 = undefined;
-            const current_formatted = installed_pv.format(&fmt_buf);
-            out.print("{s} {s} already up-to-date.\n", .{ name, current_formatted });
-            return;
+            if (installed_pv.order(index_pv) == .lt) {
+                try to_upgrade.append(allocator, .{
+                    .name = try allocator.dupe(u8, name),
+                    .installed_version = try allocator.dupe(u8, installed_latest),
+                    .index_version = index_pv,
+                });
+            } else {
+                var fmt_buf: [128]u8 = undefined;
+                const current_formatted = installed_pv.format(&fmt_buf);
+                out.print("{s} {s} already up-to-date.\n", .{ name, current_formatted });
+            }
         }
     } else {
         // No specific formula — scan all installed for outdated ones.
@@ -509,4 +521,38 @@ test "cleanupWorker compiles and has correct signature" {
     const F = @TypeOf(cleanupWorker);
     const info = @typeInfo(F);
     try std.testing.expect(info == .@"fn");
+}
+
+test "parseUpgradeArgs extracts single package name" {
+    const args = &[_][]const u8{"wget"};
+    var parsed = parseUpgradeArgs(std.testing.allocator, args);
+    defer parsed.formula_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.formula_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
+}
+
+test "parseUpgradeArgs collects multiple package names" {
+    const args = &[_][]const u8{ "wget", "curl", "jq" };
+    var parsed = parseUpgradeArgs(std.testing.allocator, args);
+    defer parsed.formula_names.deinit();
+    try std.testing.expectEqual(@as(usize, 3), parsed.formula_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
+    try std.testing.expectEqualStrings("curl", parsed.formula_names.items[1]);
+    try std.testing.expectEqualStrings("jq", parsed.formula_names.items[2]);
+}
+
+test "parseUpgradeArgs no arguments returns empty list" {
+    const args = &[_][]const u8{};
+    var parsed = parseUpgradeArgs(std.testing.allocator, args);
+    defer parsed.formula_names.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.formula_names.items.len);
+}
+
+test "parseUpgradeArgs skips flags" {
+    const args = &[_][]const u8{ "--verbose", "git", "-n", "node" };
+    var parsed = parseUpgradeArgs(std.testing.allocator, args);
+    defer parsed.formula_names.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.formula_names.items.len);
+    try std.testing.expectEqualStrings("git", parsed.formula_names.items[0]);
+    try std.testing.expectEqualStrings("node", parsed.formula_names.items[1]);
 }
