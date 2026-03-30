@@ -22,40 +22,65 @@ const batch_download = @import("../batch_download.zig");
 const cask_mod = @import("../cask.zig");
 const cask_install = @import("../cask_install.zig");
 
-/// Install a formula or cask.
+/// Install one or more formulae or casks.
 ///
-/// Usage: bru install <formula>
-///        bru install --cask <cask>
+/// Usage: bru install <formula> [<formula> ...]
+///        bru install --cask <cask> [<cask> ...]
 ///
 /// For formulae: downloads the bottle from GHCR, extracts into cellar, links.
 /// For casks: downloads archive from vendor URL, extracts into caskroom,
 /// stages binary artifacts, and links binaries into prefix.
-pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
-    // 1. Parse args — find first non-flag argument and check for --cask flag.
-    var pkg_name: ?[]const u8 = null;
-    var is_cask = false;
+const ParsedInstallArgs = struct {
+    pkg_names: std.ArrayList([]const u8),
+    is_cask: bool,
+};
+
+fn parseInstallArgs(allocator: Allocator, args: []const []const u8) ParsedInstallArgs {
+    var result = ParsedInstallArgs{
+        .pkg_names = std.ArrayList([]const u8).init(allocator),
+        .is_cask = false,
+    };
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
-            is_cask = true;
+            result.is_cask = true;
             continue;
         }
         if (arg.len > 0 and arg[0] == '-') continue;
-        if (pkg_name == null) pkg_name = arg;
+        result.pkg_names.append(arg) catch {};
     }
+    return result;
+}
 
-    const name = pkg_name orelse {
+pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
+    // 1. Parse args — collect all non-flag arguments and check for --cask flag.
+    var parsed = parseInstallArgs(allocator, args);
+    defer parsed.pkg_names.deinit();
+
+    if (parsed.pkg_names.items.len == 0) {
         var err_buf: [4096]u8 = undefined;
         var ew = std.fs.File.stderr().writer(&err_buf);
         const stderr = &ew.interface;
-        if (is_cask) {
+        if (parsed.is_cask) {
             try stderr.print("Usage: bru install --cask <cask>\n", .{});
         } else {
             try stderr.print("Usage: bru install <formula>\n", .{});
         }
         try stderr.flush();
         std.process.exit(1);
-    };
+    }
 
+    const err_out = Output.initErr(config.no_color);
+
+    for (parsed.pkg_names.items) |name| {
+        installOne(allocator, name, parsed.is_cask, args, config) catch |err| {
+            err_out.err("Failed to install \"{s}\": {s}", .{ name, @errorName(err) });
+            continue;
+        };
+    }
+}
+
+/// Install a single formula or cask by name.
+fn installOne(allocator: Allocator, name: []const u8, is_cask: bool, args: []const []const u8, config: Config) anyerror!void {
     // Tap-qualified names (e.g. "user/tap/formula") are not in the
     // homebrew-core index — fall back to the real brew binary.
     if (std.mem.indexOfScalar(u8, name, '/') != null) {
@@ -103,7 +128,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
             var cask_index = ci;
             if (cask_index.lookup(name) != null) {
                 err_out.print("Did you mean the cask \"{s}\"? Try: bru install --cask {s}\n", .{ name, name });
-                std.process.exit(1);
+                return error.FormulaNotFound;
             }
         }
 
@@ -113,7 +138,7 @@ pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config
             err_out.print("Did you mean?\n", .{});
             for (similar) |s| err_out.print("  {s}\n", .{s});
         }
-        std.process.exit(1);
+        return error.FormulaNotFound;
     };
 
     // 3. Check if already installed.
@@ -358,4 +383,58 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
 test "installCmd compiles and has correct signature" {
     const handler: @import("../dispatch.zig").CommandFn = installCmd;
     _ = handler;
+}
+
+test "parseInstallArgs extracts single package name" {
+    const args = &[_][]const u8{"wget"};
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.pkg_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.pkg_names.items[0]);
+    try std.testing.expect(!parsed.is_cask);
+}
+
+test "parseInstallArgs collects multiple package names" {
+    const args = &[_][]const u8{ "wget", "curl", "jq" };
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expectEqual(@as(usize, 3), parsed.pkg_names.items.len);
+    try std.testing.expectEqualStrings("wget", parsed.pkg_names.items[0]);
+    try std.testing.expectEqualStrings("curl", parsed.pkg_names.items[1]);
+    try std.testing.expectEqualStrings("jq", parsed.pkg_names.items[2]);
+    try std.testing.expect(!parsed.is_cask);
+}
+
+test "parseInstallArgs with --cask flag" {
+    const args = &[_][]const u8{ "--cask", "firefox", "visual-studio-code" };
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.pkg_names.items.len);
+    try std.testing.expectEqualStrings("firefox", parsed.pkg_names.items[0]);
+    try std.testing.expectEqualStrings("visual-studio-code", parsed.pkg_names.items[1]);
+    try std.testing.expect(parsed.is_cask);
+}
+
+test "parseInstallArgs no arguments" {
+    const args = &[_][]const u8{};
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.pkg_names.items.len);
+    try std.testing.expect(!parsed.is_cask);
+}
+
+test "parseInstallArgs skips flags" {
+    const args = &[_][]const u8{ "--verbose", "git", "-q", "node" };
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.pkg_names.items.len);
+    try std.testing.expectEqualStrings("git", parsed.pkg_names.items[0]);
+    try std.testing.expectEqualStrings("node", parsed.pkg_names.items[1]);
+}
+
+test "parseInstallArgs --casks is equivalent to --cask" {
+    const args = &[_][]const u8{ "--casks", "firefox" };
+    var parsed = parseInstallArgs(std.testing.allocator, args);
+    defer parsed.pkg_names.deinit();
+    try std.testing.expect(parsed.is_cask);
 }
