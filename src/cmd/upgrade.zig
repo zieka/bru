@@ -68,9 +68,8 @@ fn prepareOne(arena: Allocator, ctx: PrepareContext, item: OutdatedFormula) Prep
     }
 
     const version_base = ctx.index.getString(entry.version_offset);
-    var pkg_ver_buf_main: [256]u8 = undefined;
     const version = if (entry.revision > 0)
-        std.fmt.bufPrint(&pkg_ver_buf_main, "{s}_{d}", .{ version_base, entry.revision }) catch version_base
+        std.fmt.allocPrint(arena, "{s}_{d}", .{ version_base, entry.revision }) catch version_base
     else
         version_base;
 
