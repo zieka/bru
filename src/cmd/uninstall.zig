@@ -19,11 +19,11 @@ const ParsedUninstallArgs = struct {
 
 fn parseUninstallArgs(allocator: Allocator, args: []const []const u8) ParsedUninstallArgs {
     var result = ParsedUninstallArgs{
-        .formula_names = std.ArrayList([]const u8).init(allocator),
+        .formula_names = .{},
     };
     for (args) |arg| {
         if (arg.len > 0 and arg[0] == '-') continue;
-        result.formula_names.append(arg) catch {};
+        result.formula_names.append(allocator, arg) catch {};
     }
     return result;
 }
@@ -32,7 +32,7 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     // 1. Parse args -- support --force/-f flag and collect all formula names.
     //    Note: --force is accepted but not acted on yet (no dependency checks).
     var parsed = parseUninstallArgs(allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(allocator);
 
     // 2. If no formula names, print usage and exit(1).
     if (parsed.formula_names.items.len == 0) {
@@ -134,7 +134,7 @@ test "uninstallCmd compiles and has correct signature" {
 test "parseUninstallArgs extracts single package name" {
     const args = &[_][]const u8{"wget"};
     var parsed = parseUninstallArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
 }
@@ -142,7 +142,7 @@ test "parseUninstallArgs extracts single package name" {
 test "parseUninstallArgs collects multiple package names" {
     const args = &[_][]const u8{ "wget", "curl", "jq" };
     var parsed = parseUninstallArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
     try std.testing.expectEqualStrings("curl", parsed.formula_names.items[1]);
@@ -152,14 +152,14 @@ test "parseUninstallArgs collects multiple package names" {
 test "parseUninstallArgs no arguments" {
     const args = &[_][]const u8{};
     var parsed = parseUninstallArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), parsed.formula_names.items.len);
 }
 
 test "parseUninstallArgs skips flags" {
     const args = &[_][]const u8{ "--force", "git", "-f", "node" };
     var parsed = parseUninstallArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("git", parsed.formula_names.items[0]);
     try std.testing.expectEqualStrings("node", parsed.formula_names.items[1]);

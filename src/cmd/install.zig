@@ -37,7 +37,7 @@ const ParsedInstallArgs = struct {
 
 fn parseInstallArgs(allocator: Allocator, args: []const []const u8) ParsedInstallArgs {
     var result = ParsedInstallArgs{
-        .pkg_names = std.ArrayList([]const u8).init(allocator),
+        .pkg_names = .{},
         .is_cask = false,
     };
     for (args) |arg| {
@@ -46,7 +46,7 @@ fn parseInstallArgs(allocator: Allocator, args: []const []const u8) ParsedInstal
             continue;
         }
         if (arg.len > 0 and arg[0] == '-') continue;
-        result.pkg_names.append(arg) catch {};
+        result.pkg_names.append(allocator, arg) catch {};
     }
     return result;
 }
@@ -54,7 +54,7 @@ fn parseInstallArgs(allocator: Allocator, args: []const []const u8) ParsedInstal
 pub fn installCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
     // 1. Parse args — collect all non-flag arguments and check for --cask flag.
     var parsed = parseInstallArgs(allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(allocator);
 
     if (parsed.pkg_names.items.len == 0) {
         var err_buf: [4096]u8 = undefined;
@@ -388,7 +388,7 @@ test "installCmd compiles and has correct signature" {
 test "parseInstallArgs extracts single package name" {
     const args = &[_][]const u8{"wget"};
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.pkg_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.pkg_names.items[0]);
     try std.testing.expect(!parsed.is_cask);
@@ -397,7 +397,7 @@ test "parseInstallArgs extracts single package name" {
 test "parseInstallArgs collects multiple package names" {
     const args = &[_][]const u8{ "wget", "curl", "jq" };
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), parsed.pkg_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.pkg_names.items[0]);
     try std.testing.expectEqualStrings("curl", parsed.pkg_names.items[1]);
@@ -408,7 +408,7 @@ test "parseInstallArgs collects multiple package names" {
 test "parseInstallArgs with --cask flag" {
     const args = &[_][]const u8{ "--cask", "firefox", "visual-studio-code" };
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), parsed.pkg_names.items.len);
     try std.testing.expectEqualStrings("firefox", parsed.pkg_names.items[0]);
     try std.testing.expectEqualStrings("visual-studio-code", parsed.pkg_names.items[1]);
@@ -418,7 +418,7 @@ test "parseInstallArgs with --cask flag" {
 test "parseInstallArgs no arguments" {
     const args = &[_][]const u8{};
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), parsed.pkg_names.items.len);
     try std.testing.expect(!parsed.is_cask);
 }
@@ -426,7 +426,7 @@ test "parseInstallArgs no arguments" {
 test "parseInstallArgs skips flags" {
     const args = &[_][]const u8{ "--verbose", "git", "-q", "node" };
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), parsed.pkg_names.items.len);
     try std.testing.expectEqualStrings("git", parsed.pkg_names.items[0]);
     try std.testing.expectEqualStrings("node", parsed.pkg_names.items[1]);
@@ -435,6 +435,6 @@ test "parseInstallArgs skips flags" {
 test "parseInstallArgs --casks is equivalent to --cask" {
     const args = &[_][]const u8{ "--casks", "firefox" };
     var parsed = parseInstallArgs(std.testing.allocator, args);
-    defer parsed.pkg_names.deinit();
+    defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expect(parsed.is_cask);
 }

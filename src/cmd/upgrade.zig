@@ -210,11 +210,11 @@ const ParsedUpgradeArgs = struct {
 
 fn parseUpgradeArgs(allocator: Allocator, args: []const []const u8) ParsedUpgradeArgs {
     var result = ParsedUpgradeArgs{
-        .formula_names = std.ArrayList([]const u8).init(allocator),
+        .formula_names = .{},
     };
     for (args) |arg| {
         if (arg.len > 0 and arg[0] == '-') continue;
-        result.formula_names.append(arg) catch {};
+        result.formula_names.append(allocator, arg) catch {};
     }
     return result;
 }
@@ -225,7 +225,7 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     // Parse args — collect all non-flag arguments as formula names.
     var parsed = parseUpgradeArgs(allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(allocator);
 
     // Load index.
     var index = try Index.loadOrBuild(allocator, config.cache);
@@ -526,7 +526,7 @@ test "cleanupWorker compiles and has correct signature" {
 test "parseUpgradeArgs extracts single package name" {
     const args = &[_][]const u8{"wget"};
     var parsed = parseUpgradeArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
 }
@@ -534,7 +534,7 @@ test "parseUpgradeArgs extracts single package name" {
 test "parseUpgradeArgs collects multiple package names" {
     const args = &[_][]const u8{ "wget", "curl", "jq" };
     var parsed = parseUpgradeArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.formula_names.items[0]);
     try std.testing.expectEqualStrings("curl", parsed.formula_names.items[1]);
@@ -544,14 +544,14 @@ test "parseUpgradeArgs collects multiple package names" {
 test "parseUpgradeArgs no arguments returns empty list" {
     const args = &[_][]const u8{};
     var parsed = parseUpgradeArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), parsed.formula_names.items.len);
 }
 
 test "parseUpgradeArgs skips flags" {
     const args = &[_][]const u8{ "--verbose", "git", "-n", "node" };
     var parsed = parseUpgradeArgs(std.testing.allocator, args);
-    defer parsed.formula_names.deinit();
+    defer parsed.formula_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), parsed.formula_names.items.len);
     try std.testing.expectEqualStrings("git", parsed.formula_names.items[0]);
     try std.testing.expectEqualStrings("node", parsed.formula_names.items[1]);

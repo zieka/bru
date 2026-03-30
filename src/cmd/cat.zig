@@ -16,7 +16,7 @@ const ParsedCatArgs = struct {
 
 fn parseCatArgs(allocator: Allocator, args: []const []const u8) ParsedCatArgs {
     var result = ParsedCatArgs{
-        .package_names = std.ArrayList([]const u8).init(allocator),
+        .package_names = .{},
         .force_formula = false,
         .force_cask = false,
     };
@@ -26,7 +26,7 @@ fn parseCatArgs(allocator: Allocator, args: []const []const u8) ParsedCatArgs {
         } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             result.force_cask = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            result.package_names.append(arg) catch {};
+            result.package_names.append(allocator, arg) catch {};
         }
     }
     return result;
@@ -40,7 +40,7 @@ fn parseCatArgs(allocator: Allocator, args: []const []const u8) ParsedCatArgs {
 /// from the local tap directory or fetches it from GitHub.
 pub fn catCmd(allocator: Allocator, args: []const []const u8, config: Config) anyerror!void {
     var parsed = parseCatArgs(allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(allocator);
 
     if (parsed.package_names.items.len == 0) {
         const err_out = Output.initErr(config.no_color);
@@ -203,7 +203,7 @@ test "catCmd compiles and has correct signature" {
 test "parseCatArgs extracts package name" {
     const args = &[_][]const u8{"wget"};
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.package_names.items[0]);
     try std.testing.expect(!parsed.force_formula);
@@ -213,7 +213,7 @@ test "parseCatArgs extracts package name" {
 test "parseCatArgs with --formula flag" {
     const args = &[_][]const u8{ "--formula", "git" };
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
     try std.testing.expectEqualStrings("git", parsed.package_names.items[0]);
     try std.testing.expect(parsed.force_formula);
@@ -223,7 +223,7 @@ test "parseCatArgs with --formula flag" {
 test "parseCatArgs with --cask flag" {
     const args = &[_][]const u8{ "--cask", "firefox" };
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
     try std.testing.expectEqualStrings("firefox", parsed.package_names.items[0]);
     try std.testing.expect(!parsed.force_formula);
@@ -233,14 +233,14 @@ test "parseCatArgs with --cask flag" {
 test "parseCatArgs no arguments" {
     const args = &[_][]const u8{};
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), parsed.package_names.items.len);
 }
 
 test "parseCatArgs skips unknown flags" {
     const args = &[_][]const u8{ "--verbose", "jq" };
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed.package_names.items.len);
     try std.testing.expectEqualStrings("jq", parsed.package_names.items[0]);
 }
@@ -248,7 +248,7 @@ test "parseCatArgs skips unknown flags" {
 test "parseCatArgs collects multiple package names" {
     const args = &[_][]const u8{ "wget", "curl", "--formula", "jq" };
     var parsed = parseCatArgs(std.testing.allocator, args);
-    defer parsed.package_names.deinit();
+    defer parsed.package_names.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), parsed.package_names.items.len);
     try std.testing.expectEqualStrings("wget", parsed.package_names.items[0]);
     try std.testing.expectEqualStrings("curl", parsed.package_names.items[1]);
