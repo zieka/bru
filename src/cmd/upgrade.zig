@@ -226,6 +226,30 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
     var parsed = parseUpgradeArgs(allocator, args);
     defer parsed.formula_names.deinit(allocator);
 
+    // Auto-update: fetch fresh formula data before comparing versions.
+    {
+        var jws_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const jws_path = std.fmt.bufPrint(&jws_buf, "{s}/api/formula.jws.json", .{config.cache}) catch
+            return error.PathTooLong;
+
+        var idx_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/formula.bru.idx", .{config.cache}) catch
+            return error.PathTooLong;
+
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const api_dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{config.cache}) catch
+            return error.PathTooLong;
+        std.fs.cwd().makePath(api_dir) catch {};
+
+        var client = HttpClient.init(allocator);
+        defer client.deinit();
+
+        if (client.fetch("https://formulae.brew.sh/api/formula.jws.json", jws_path)) {
+            // Fresh data downloaded — delete stale binary index to force rebuild.
+            std.fs.deleteFileAbsolute(idx_path) catch {};
+        } else |_| {}
+    }
+
     // Load index.
     var index = try Index.loadOrBuild(allocator, config.cache);
     // Note: do not call index.deinit() -- the index may be mmap'd (from disk)
