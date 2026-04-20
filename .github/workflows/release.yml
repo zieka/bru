@@ -62,6 +62,16 @@ jobs:
           echo "Commits since ${LATEST_TAG}:"
           echo "$SUBJECTS" | sed 's/^/  /'
 
+          # Collect candidate conventional-commit lines from both subjects
+          # and body bullets. GitHub squash-merges put the PR title in the
+          # subject and nest each original commit as "* type: ..." in the
+          # body, so scanning subjects alone misses squash-merged PRs whose
+          # title is not itself a conventional commit.
+          CANDIDATES=$(
+            printf '%s\n' "$SUBJECTS"
+            printf '%s\n' "$BODIES" | sed -nE 's/^[[:space:]]*\*[[:space:]]+//p'
+          )
+
           # Determine bump type from conventional commits
           # Priority: major > minor > patch > none
           BUMP="none"
@@ -84,7 +94,7 @@ jobs:
             if echo "$msg" | grep -qE '^(fix|perf|refactor)(\(.+\))?:'; then
               [[ "$BUMP" == "none" ]] && BUMP="patch"
             fi
-          done <<< "$SUBJECTS"
+          done <<< "$CANDIDATES"
 
           if [[ "$BUMP" == "none" ]]; then
             echo "No releasable commits (only docs/ci/chore/etc.) — skipping release"
