@@ -102,8 +102,11 @@ fn prepareOne(arena: Allocator, ctx: PrepareContext, item: OutdatedFormula) Prep
         return .{ .failure = .{ .err_name = @errorName(err) } };
     };
 
-    // Replace placeholders.
+    // Replace placeholders in text files and Mach-O binaries. Without the
+    // relocateMachO step, dylibs retain literal @@HOMEBREW_PREFIX@@ paths in
+    // their load commands and fail to resolve dependencies at runtime.
     bottle_inst.replacePlaceholders(keg_path) catch {};
+    bottle_inst.relocateMachO(keg_path) catch {};
 
     // Build runtime_dependencies and write install receipt.
     {
