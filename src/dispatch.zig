@@ -35,6 +35,7 @@ const completions = @import("cmd/completions.zig");
 const env_cmd = @import("cmd/env.zig");
 const migrate = @import("cmd/migrate.zig");
 const rollback = @import("cmd/rollback.zig");
+const relocate = @import("cmd/relocate.zig");
 const bundle = @import("cmd/bundle.zig");
 const services = @import("cmd/services.zig");
 const self_update = @import("cmd/self_update.zig");
@@ -104,6 +105,7 @@ pub const native_commands = [_]CommandEntry{
     .{ .name = "env", .handler = env_cmd.envCmd },
     .{ .name = "migrate", .handler = migrate.migrateCmd },
     .{ .name = "rollback", .handler = rollback.rollbackCmd },
+    .{ .name = "relocate", .handler = relocate.relocateCmd },
     .{ .name = "bundle", .handler = bundle.bundleCmd },
     .{ .name = "services", .handler = services.servicesCmd },
     .{ .name = "self-update", .handler = self_update.selfUpdateCmd },

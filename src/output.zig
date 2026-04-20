@@ -31,7 +31,7 @@ pub const Output = struct {
     /// Write formatted text to the output.
     pub fn print(self: Output, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        var w = self.file.writer(&buf);
+        var w = self.file.writerStreaming(&buf);
         const writer = &w.interface;
         writer.print(fmt, args) catch {};
         writer.flush() catch {};
@@ -42,7 +42,7 @@ pub const Output = struct {
     /// Without color: plain "==> Title\n".
     pub fn section(self: Output, title: []const u8) void {
         var buf: [4096]u8 = undefined;
-        var w = self.file.writer(&buf);
+        var w = self.file.writerStreaming(&buf);
         const writer = &w.interface;
 
         if (self.use_color) {
@@ -57,7 +57,7 @@ pub const Output = struct {
     /// With color: yellow "Warning:" prefix.
     pub fn warn(self: Output, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        var w = self.file.writer(&buf);
+        var w = self.file.writerStreaming(&buf);
         const writer = &w.interface;
 
         if (self.use_color) {
@@ -76,7 +76,7 @@ pub const Output = struct {
     /// Use Output.initErr() to target stderr.
     pub fn err(self: Output, comptime fmt: []const u8, args: anytype) void {
         var buf: [4096]u8 = undefined;
-        var w = self.file.writer(&buf);
+        var w = self.file.writerStreaming(&buf);
         const writer = &w.interface;
 
         if (self.use_color) {
