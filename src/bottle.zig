@@ -614,6 +614,43 @@ pub const Bottle = struct {
             }
         }
 
+        // Parse otool -l output for LC_RPATH entries with placeholders.
+        // Homebrew bottles can embed @rpath search entries that must also be
+        // rewritten; otherwise dependent dylibs fail to resolve at runtime.
+        const otool_all = std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "otool", "-l", full_path },
+        }) catch null;
+        if (otool_all) |cmd_out| {
+            defer self.allocator.free(cmd_out.stdout);
+            defer self.allocator.free(cmd_out.stderr);
+
+            var lines = mem.splitScalar(u8, cmd_out.stdout, '\n');
+            var in_rpath = false;
+            while (lines.next()) |line| {
+                const trimmed = mem.trim(u8, line, " \t");
+                if (mem.eql(u8, trimmed, "cmd LC_RPATH")) {
+                    in_rpath = true;
+                    continue;
+                }
+                if (!in_rpath) continue;
+                if (!mem.startsWith(u8, trimmed, "path ")) continue;
+
+                in_rpath = false;
+                const after = trimmed[5..];
+                const end = mem.indexOf(u8, after, " (") orelse after.len;
+                const old_rpath = mem.trim(u8, after[0..end], " \t");
+                if (!hasPlaceholder(old_rpath)) continue;
+
+                const new_rpath = try self.replacePlaceholderPath(old_rpath);
+
+                try args.append(self.allocator, "-rpath");
+                try args.append(self.allocator, try self.allocator.dupe(u8, old_rpath));
+                try args.append(self.allocator, new_rpath);
+                has_changes = true;
+            }
+        }
+
         if (!has_changes) return;
 
         try args.append(self.allocator, try self.allocator.dupe(u8, full_path));
@@ -641,12 +678,13 @@ pub const Bottle = struct {
     }
 
     /// Check if a string was heap-allocated (not a string literal from argv).
-    /// We know literals are "install_name_tool", "-id", "-change"; everything
-    /// else was allocated.
+    /// We know literals are "install_name_tool", "-id", "-change", "-rpath";
+    /// everything else was allocated.
     fn isPlaceholderAllocated(s: []const u8) bool {
         return !mem.eql(u8, s, "install_name_tool") and
             !mem.eql(u8, s, "-id") and
-            !mem.eql(u8, s, "-change");
+            !mem.eql(u8, s, "-change") and
+            !mem.eql(u8, s, "-rpath");
     }
 
     /// Replace @@HOMEBREW_CELLAR@@ and @@HOMEBREW_PREFIX@@ in a path string.
@@ -1133,5 +1171,194 @@ test "pourWithCache returns cached keg on second call" {
     const extracted2 = try tmp.dir.readFileAlloc(allocator, "cellar/cachepkg/1.0.0/bin/tool", 1024 * 1024);
     defer allocator.free(extracted2);
     try std.testing.expectEqualStrings("#!/bin/sh\necho cachepkg\n", extracted2);
+}
+
+// Compile a trivial C file to a Mach-O dylib and stamp placeholder paths into
+// its load commands. Returns the absolute dylib path; caller owns it.
+fn buildDylibWithPlaceholders(
+    allocator: Allocator,
+    tmp_dir: fs.Dir,
+    subpath: []const u8,
+    placeholder_id: []const u8,
+) ![]const u8 {
+    const dir = std.fs.path.dirname(subpath) orelse ".";
+    try tmp_dir.makePath(dir);
+
+    const c_subpath = try std.fmt.allocPrint(allocator, "{s}.c", .{subpath});
+    defer allocator.free(c_subpath);
+
+    try tmp_dir.writeFile(.{
+        .sub_path = c_subpath,
+        .data = "int bru_test_fn(void) { return 42; }\n",
+    });
+
+    var tmp_buf: [fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp_dir.realpath(".", &tmp_buf);
+
+    const c_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_path, c_subpath });
+    defer allocator.free(c_path);
+
+    const dylib_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_path, subpath });
+    errdefer allocator.free(dylib_path);
+
+    const cc = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "cc", "-dynamiclib", "-o", dylib_path, c_path },
+    });
+    allocator.free(cc.stdout);
+    allocator.free(cc.stderr);
+    if (cc.term != .Exited or cc.term.Exited != 0) return error.TestCompileFailed;
+
+    const int = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "install_name_tool", "-id", placeholder_id, dylib_path },
+    });
+    allocator.free(int.stdout);
+    allocator.free(int.stderr);
+    if (int.term != .Exited or int.term.Exited != 0) return error.TestInstallNameToolFailed;
+
+    const cs = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "codesign", "--force", "--sign", "-", dylib_path },
+    });
+    allocator.free(cs.stdout);
+    allocator.free(cs.stderr);
+
+    return dylib_path;
+}
+
+test "relocateMachO rewrites placeholder install name in Mach-O dylib" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dylib_path = try buildDylibWithPlaceholders(
+        allocator,
+        tmp.dir,
+        "lib/libbrutest.dylib",
+        "@@HOMEBREW_PREFIX@@/opt/brutest/lib/libbrutest.dylib",
+    );
+    defer allocator.free(dylib_path);
+
+    var keg_buf: [fs.max_path_bytes]u8 = undefined;
+    const keg_path = try tmp.dir.realpath(".", &keg_buf);
+
+    // Sanity: placeholder is present before relocation.
+    {
+        const before = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "otool", "-D", dylib_path },
+        });
+        defer allocator.free(before.stdout);
+        defer allocator.free(before.stderr);
+        try std.testing.expect(mem.indexOf(u8, before.stdout, "@@HOMEBREW_PREFIX@@") != null);
+    }
+
+    const bottle = Bottle{
+        .allocator = allocator,
+        .cellar = "/opt/homebrew/Cellar",
+        .prefix = "/opt/homebrew",
+    };
+    try bottle.relocateMachO(keg_path);
+
+    // Placeholder is gone and rewritten to the real prefix.
+    const after = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "otool", "-D", dylib_path },
+    });
+    defer allocator.free(after.stdout);
+    defer allocator.free(after.stderr);
+    try std.testing.expect(mem.indexOf(u8, after.stdout, "@@HOMEBREW_PREFIX@@") == null);
+    try std.testing.expect(
+        mem.indexOf(u8, after.stdout, "/opt/homebrew/opt/brutest/lib/libbrutest.dylib") != null,
+    );
+}
+
+test "relocateMachO rewrites placeholder LC_RPATH entries" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Build a dylib with headerpad so we can inject an rpath without
+    // overflowing load command capacity (mirrors how Homebrew builds bottles).
+    try tmp.dir.makePath("lib");
+    try tmp.dir.writeFile(.{ .sub_path = "lib/libpad.c", .data = "int f(void){return 1;}\n" });
+
+    var tmp_buf: [fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &tmp_buf);
+
+    const c_path = try std.fmt.allocPrint(allocator, "{s}/lib/libpad.c", .{tmp_path});
+    defer allocator.free(c_path);
+    const dylib_path = try std.fmt.allocPrint(allocator, "{s}/lib/libpad.dylib", .{tmp_path});
+    defer allocator.free(dylib_path);
+
+    const cc = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "cc", "-dynamiclib", "-Wl,-headerpad_max_install_names", "-o", dylib_path, c_path },
+    });
+    allocator.free(cc.stdout);
+    allocator.free(cc.stderr);
+    try std.testing.expect(cc.term == .Exited and cc.term.Exited == 0);
+
+    // Inject a placeholder rpath.
+    const add_rpath = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{
+            "install_name_tool",
+            "-add_rpath",
+            "@@HOMEBREW_PREFIX@@/opt/provider/lib",
+            dylib_path,
+        },
+    });
+    allocator.free(add_rpath.stdout);
+    allocator.free(add_rpath.stderr);
+    try std.testing.expect(add_rpath.term == .Exited and add_rpath.term.Exited == 0);
+
+    const cs = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "codesign", "--force", "--sign", "-", dylib_path },
+    });
+    allocator.free(cs.stdout);
+    allocator.free(cs.stderr);
+
+    // Sanity: otool -l shows the placeholder rpath.
+    {
+        const before = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "otool", "-l", dylib_path },
+        });
+        defer allocator.free(before.stdout);
+        defer allocator.free(before.stderr);
+        try std.testing.expect(
+            mem.indexOf(u8, before.stdout, "@@HOMEBREW_PREFIX@@/opt/provider/lib") != null,
+        );
+    }
+
+    const bottle = Bottle{
+        .allocator = allocator,
+        .cellar = "/opt/homebrew/Cellar",
+        .prefix = "/opt/homebrew",
+    };
+    try bottle.relocateMachO(tmp_path);
+
+    // The placeholder rpath is gone and rewritten to the real prefix.
+    const after_rpath = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "otool", "-l", dylib_path },
+    });
+    defer allocator.free(after_rpath.stdout);
+    defer allocator.free(after_rpath.stderr);
+    try std.testing.expect(mem.indexOf(u8, after_rpath.stdout, "@@HOMEBREW_PREFIX@@") == null);
+    try std.testing.expect(
+        mem.indexOf(u8, after_rpath.stdout, "/opt/homebrew/opt/provider/lib") != null,
+    );
 }
 
