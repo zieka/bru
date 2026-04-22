@@ -4,6 +4,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const Config = @import("../config.zig").Config;
 const Cellar = @import("../cellar.zig").Cellar;
+const Linker = @import("../linker.zig").Linker;
 const Output = @import("../output.zig").Output;
 
 /// Default number of days to retain cached downloads before pruning.
@@ -80,9 +81,12 @@ pub fn cleanupCmd(allocator: Allocator, args: []const []const u8, config: Config
     // 3c. Extracted keg cache (directories in {cache}/kegs/).
     const kegs_removed = pruneOldDirs(config.cache, "kegs", max_age_secs, dry_run, out, err_out);
 
+    // 3d. Dangling symlinks left in the prefix (targets that no longer exist).
+    const dangling_removed = sweepDangling(config.prefix, dry_run, out, err_out);
+
     // 4. Print summary.
     const total_cache = downloads_removed + blobs_removed + kegs_removed;
-    if (versions_removed > 0 or total_cache > 0) {
+    if (versions_removed > 0 or total_cache > 0 or dangling_removed > 0) {
         out.section("Cleanup complete");
     }
     if (versions_removed > 0) {
@@ -97,9 +101,67 @@ pub fn cleanupCmd(allocator: Allocator, args: []const []const u8, config: Config
             if (total_cache == 1) "" else "s",
         });
     }
-    if (versions_removed == 0 and total_cache == 0) {
+    if (dangling_removed > 0) {
+        out.print("Removed {d} dangling symlink{s}.\n", .{
+            dangling_removed,
+            if (dangling_removed == 1) "" else "s",
+        });
+    }
+    if (versions_removed == 0 and total_cache == 0 and dangling_removed == 0) {
         out.print("Already clean.\n", .{});
     }
+}
+
+/// Walk the prefix's standard link dirs (bin/sbin/lib/include/share/etc/var + opt)
+/// and remove any symlinks whose targets no longer exist.
+fn sweepDangling(prefix: []const u8, dry_run: bool, out: Output, err_out: Output) u32 {
+    var removed: u32 = 0;
+    for (Linker.std_dirs) |dir| {
+        var dir_buf: [fs.max_path_bytes]u8 = undefined;
+        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, dir }) catch continue;
+        removed += sweepDanglingDir(dir_path, dry_run, out, err_out);
+    }
+    var opt_buf: [fs.max_path_bytes]u8 = undefined;
+    const opt_dir = std.fmt.bufPrint(&opt_buf, "{s}/opt", .{prefix}) catch return removed;
+    removed += sweepDanglingDir(opt_dir, dry_run, out, err_out);
+    return removed;
+}
+
+/// Recursively walk `dir_path`, removing symlinks whose resolved targets don't exist.
+fn sweepDanglingDir(dir_path: []const u8, dry_run: bool, out: Output, err_out: Output) u32 {
+    var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
+    defer dir.close();
+
+    var removed: u32 = 0;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .sym_link) {
+            var full_buf: [fs.max_path_bytes]u8 = undefined;
+            const full_path = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+
+            // access(2) follows symlinks; ENOENT means the target is gone.
+            fs.accessAbsolute(full_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    if (dry_run) {
+                        out.print("Would remove dangling symlink: {s}\n", .{full_path});
+                    } else {
+                        out.print("Removing dangling symlink: {s}\n", .{full_path});
+                        fs.deleteFileAbsolute(full_path) catch |del_err| {
+                            err_out.err("Could not remove {s}: {s}", .{ full_path, @errorName(del_err) });
+                            continue;
+                        };
+                    }
+                    removed += 1;
+                },
+                else => continue,
+            };
+        } else if (entry.kind == .directory) {
+            var sub_buf: [fs.max_path_bytes]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            removed += sweepDanglingDir(sub_path, dry_run, out, err_out);
+        }
+    }
+    return removed;
 }
 
 /// Prune files older than max_age_secs from {cache}/{subdir}/.
@@ -205,5 +267,82 @@ test "cleanupCmd compiles and has correct signature" {
     _ = handler;
 }
 
-// Note: dry-run integration test removed — writing to stdout during tests
+// Note: dry-run integration test for cleanupCmd removed — writing to stdout during tests
 // corrupts zig build test's IPC protocol. Use test/compat/compare.sh instead.
+// Sweep-specific tests below route Output to a file sink to stay off stdout.
+
+test "sweepDanglingDir removes dangling symlink and preserves good one" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("prefix");
+    try tmp.dir.symLink("/does/not/exist", "prefix/dangling", .{});
+    (try tmp.dir.createFile("prefix/real", .{})).close();
+    try tmp.dir.symLink("./real", "prefix/ok", .{});
+
+    const sink = try tmp.dir.createFile("sink", .{});
+    defer sink.close();
+    const out = Output{ .file = sink, .use_color = false };
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath("prefix", &prefix_buf);
+
+    const removed = sweepDanglingDir(prefix_path, false, out, out);
+    try std.testing.expectEqual(@as(u32, 1), removed);
+
+    var read_buf: [fs.max_path_bytes]u8 = undefined;
+    var dpath_buf: [fs.max_path_bytes]u8 = undefined;
+    const dpath = try std.fmt.bufPrint(&dpath_buf, "{s}/dangling", .{prefix_path});
+    try std.testing.expectError(error.FileNotFound, fs.readLinkAbsolute(dpath, &read_buf));
+
+    var ok_buf: [fs.max_path_bytes]u8 = undefined;
+    const ok_path = try std.fmt.bufPrint(&ok_buf, "{s}/ok", .{prefix_path});
+    _ = try fs.readLinkAbsolute(ok_path, &read_buf);
+}
+
+test "sweepDanglingDir dry-run does not delete" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("prefix");
+    try tmp.dir.symLink("/does/not/exist", "prefix/dangling", .{});
+
+    const sink = try tmp.dir.createFile("sink", .{});
+    defer sink.close();
+    const out = Output{ .file = sink, .use_color = false };
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath("prefix", &prefix_buf);
+
+    const removed = sweepDanglingDir(prefix_path, true, out, out);
+    try std.testing.expectEqual(@as(u32, 1), removed);
+
+    // Link still present.
+    var read_buf: [fs.max_path_bytes]u8 = undefined;
+    var dpath_buf: [fs.max_path_bytes]u8 = undefined;
+    const dpath = try std.fmt.bufPrint(&dpath_buf, "{s}/dangling", .{prefix_path});
+    _ = try fs.readLinkAbsolute(dpath, &read_buf);
+}
+
+test "sweepDanglingDir recurses into subdirectories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("prefix/lib/pkgconfig");
+    try tmp.dir.symLink("/does/not/exist", "prefix/lib/pkgconfig/bad.pc", .{});
+
+    const sink = try tmp.dir.createFile("sink", .{});
+    defer sink.close();
+    const out = Output{ .file = sink, .use_color = false };
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath("prefix", &prefix_buf);
+
+    const removed = sweepDanglingDir(prefix_path, false, out, out);
+    try std.testing.expectEqual(@as(u32, 1), removed);
+
+    var read_buf: [fs.max_path_bytes]u8 = undefined;
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const bad_path = try std.fmt.bufPrint(&path_buf, "{s}/lib/pkgconfig/bad.pc", .{prefix_path});
+    try std.testing.expectError(error.FileNotFound, fs.readLinkAbsolute(bad_path, &read_buf));
+}
