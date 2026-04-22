@@ -9,7 +9,7 @@ pub const Linker = struct {
     allocator: Allocator,
 
     /// Standard directories to link from a keg into the prefix.
-    const std_dirs = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc", "var" };
+    pub const std_dirs = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc", "var" };
 
     pub fn init(allocator: Allocator, prefix: []const u8) Linker {
         return .{ .prefix = prefix, .allocator = allocator };
@@ -69,26 +69,37 @@ pub const Linker = struct {
     }
 
     /// Remove all symlinks from prefix that point into the given keg.
+    ///
+    /// Handles both absolute symlink targets (bru-installed) and relative
+    /// targets (Homebrew-installed, e.g. `/opt/homebrew/bin/mod -> ../Cellar/mod/...`)
+    /// by resolving each target against the symlink's parent directory before
+    /// comparing to keg_path.
     pub fn unlink(self: Linker, keg_path: []const u8) !void {
         // Walk each standard directory in prefix and remove symlinks pointing into keg_path.
+        // bin/sbin contain only flat file symlinks; the rest can be nested.
         for (std_dirs) |dir| {
             var prefix_dir_buf: [fs.max_path_bytes]u8 = undefined;
             const prefix_dir_path = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, dir }) catch continue;
 
-            self.unlinkRecursive(prefix_dir_path, keg_path) catch continue;
+            const recurse = !(mem.eql(u8, dir, "bin") or mem.eql(u8, dir, "sbin"));
+            unlinkDir(self.allocator, prefix_dir_path, keg_path, recurse);
         }
 
-        // Also remove the opt link.
-        // Parse name from keg_path: {cellar}/{name}/{version}
-        // The name is the second-to-last path component.
+        // Remove the opt link if it exists and points at this keg.
         if (parseKegName(keg_path)) |name| {
-            var opt_link_buf: [fs.max_path_bytes]u8 = undefined;
-            const opt_link_path = std.fmt.bufPrint(&opt_link_buf, "{s}/opt/{s}", .{ self.prefix, name }) catch return;
+            var opt_dir_buf: [fs.max_path_bytes]u8 = undefined;
+            const opt_dir = std.fmt.bufPrint(&opt_dir_buf, "{s}/opt", .{self.prefix}) catch return;
 
-            // Only remove if it's a symlink pointing into this keg.
+            var opt_link_buf: [fs.max_path_bytes]u8 = undefined;
+            const opt_link_path = std.fmt.bufPrint(&opt_link_buf, "{s}/{s}", .{ opt_dir, name }) catch return;
+
             var read_buf: [fs.max_path_bytes]u8 = undefined;
             const target = fs.readLinkAbsolute(opt_link_path, &read_buf) catch return;
-            if (mem.startsWith(u8, target, keg_path)) {
+
+            const resolved = std.fs.path.resolvePosix(self.allocator, &.{ opt_dir, target }) catch return;
+            defer self.allocator.free(resolved);
+
+            if (mem.eql(u8, resolved, keg_path)) {
                 fs.deleteFileAbsolute(opt_link_path) catch {};
             }
         }
@@ -155,62 +166,46 @@ pub const Linker = struct {
         }
     }
 
-    /// Recursively walk a prefix directory and remove symlinks pointing into keg_path.
-    fn unlinkRecursive(self: Linker, dir_path: []const u8, keg_path: []const u8) !void {
-        _ = self;
-        var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-        defer dir.close();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind == .sym_link) {
-                var full_buf: [fs.max_path_bytes]u8 = undefined;
-                const full_path = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-
-                var read_buf: [fs.max_path_bytes]u8 = undefined;
-                const target = fs.readLinkAbsolute(full_path, &read_buf) catch continue;
-
-                if (mem.startsWith(u8, target, keg_path)) {
-                    fs.deleteFileAbsolute(full_path) catch {};
-                }
-            } else if (entry.kind == .directory) {
-                // Recurse into subdirectories.
-                var sub_buf: [fs.max_path_bytes]u8 = undefined;
-                const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-
-                // Use a nested call; we need to be careful not to re-use self since
-                // unlinkRecursive doesn't actually use self. We call through the function directly.
-                unlinkRecursiveStatic(sub_path, keg_path);
-            }
-        }
-    }
-
-    /// Static version of unlinkRecursive (no self needed) to avoid method resolution issues in recursion.
-    fn unlinkRecursiveStatic(dir_path: []const u8, keg_path: []const u8) void {
-        var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-        defer dir.close();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind == .sym_link) {
-                var full_buf: [fs.max_path_bytes]u8 = undefined;
-                const full_path = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-
-                var read_buf: [fs.max_path_bytes]u8 = undefined;
-                const target = fs.readLinkAbsolute(full_path, &read_buf) catch continue;
-
-                if (mem.startsWith(u8, target, keg_path)) {
-                    fs.deleteFileAbsolute(full_path) catch {};
-                }
-            } else if (entry.kind == .directory) {
-                var sub_buf: [fs.max_path_bytes]u8 = undefined;
-                const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
-
-                unlinkRecursiveStatic(sub_path, keg_path);
-            }
-        }
-    }
 };
+
+/// Walk `dir_path`, removing any symlinks whose resolved target is inside `keg_path`.
+/// If `recurse` is true, descends into subdirectories (for lib/include/share/etc/var).
+fn unlinkDir(allocator: Allocator, dir_path: []const u8, keg_path: []const u8, recurse: bool) void {
+    var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .sym_link) {
+            var full_buf: [fs.max_path_bytes]u8 = undefined;
+            const full_path = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+
+            var read_buf: [fs.max_path_bytes]u8 = undefined;
+            const target = fs.readLinkAbsolute(full_path, &read_buf) catch continue;
+
+            // Resolve target relative to the symlink's parent dir — handles both
+            // absolute targets (bru-style) and relative ones (Homebrew-style).
+            const resolved = std.fs.path.resolvePosix(allocator, &.{ dir_path, target }) catch continue;
+            defer allocator.free(resolved);
+
+            if (isUnderKeg(resolved, keg_path)) {
+                fs.deleteFileAbsolute(full_path) catch {};
+            }
+        } else if (entry.kind == .directory and recurse) {
+            var sub_buf: [fs.max_path_bytes]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            unlinkDir(allocator, sub_path, keg_path, true);
+        }
+    }
+}
+
+/// True when `path` equals `keg_path` or lies inside it as a subpath.
+/// Boundary-checked so "{cellar}/foo/1.0" does not match "{cellar}/foo/1.0.1".
+fn isUnderKeg(path: []const u8, keg_path: []const u8) bool {
+    if (!mem.startsWith(u8, path, keg_path)) return false;
+    if (path.len == keg_path.len) return true;
+    return path[keg_path.len] == '/';
+}
 
 /// Parse the formula name from a keg path like "{cellar}/{name}/{version}".
 /// Returns the name component, or null if the path doesn't have enough segments.
@@ -398,6 +393,117 @@ test "unlink removes opt link" {
     };
 
     return error.TestUnexpectedResult;
+}
+
+test "unlink removes relative (Homebrew-style) symlinks" {
+    // Simulates a package installed by real Homebrew: the prefix symlinks have
+    // relative targets like `../Cellar/foo/1.0/bin/hello`.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("Cellar/foo/1.0/bin");
+    (try tmp.dir.createFile("Cellar/foo/1.0/bin/hello", .{})).close();
+
+    try tmp.dir.makePath("bin");
+    try tmp.dir.symLink("../Cellar/foo/1.0/bin/hello", "bin/hello", .{});
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath(".", &prefix_buf);
+
+    var keg_buf: [fs.max_path_bytes]u8 = undefined;
+    const keg_path = try tmp.dir.realpath("Cellar/foo/1.0", &keg_buf);
+
+    const linker = Linker.init(std.testing.allocator, prefix_path);
+    try linker.unlink(keg_path);
+
+    var link_path_buf: [fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/bin/hello", .{prefix_path});
+
+    var verify_buf: [fs.max_path_bytes]u8 = undefined;
+    _ = fs.readLinkAbsolute(link_path, &verify_buf) catch |err| {
+        try std.testing.expect(err == error.FileNotFound);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "unlink respects version-prefix boundary (foo/1.0 vs foo/1.0.1)" {
+    // Unlinking `foo/1.0` must not remove a symlink owned by `foo/1.0.1`,
+    // even though one keg path is a string prefix of the other.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("Cellar/foo/1.0/bin");
+    (try tmp.dir.createFile("Cellar/foo/1.0/bin/hello", .{})).close();
+    try tmp.dir.makePath("Cellar/foo/1.0.1/bin");
+    (try tmp.dir.createFile("Cellar/foo/1.0.1/bin/goodbye", .{})).close();
+
+    try tmp.dir.makePath("bin");
+    try tmp.dir.symLink("../Cellar/foo/1.0/bin/hello", "bin/hello", .{});
+    try tmp.dir.symLink("../Cellar/foo/1.0.1/bin/goodbye", "bin/goodbye", .{});
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath(".", &prefix_buf);
+
+    var keg_buf: [fs.max_path_bytes]u8 = undefined;
+    const keg_path = try tmp.dir.realpath("Cellar/foo/1.0", &keg_buf);
+
+    const linker = Linker.init(std.testing.allocator, prefix_path);
+    try linker.unlink(keg_path);
+
+    // hello (owned by foo/1.0) must be gone.
+    var hello_buf: [fs.max_path_bytes]u8 = undefined;
+    const hello_link = try std.fmt.bufPrint(&hello_buf, "{s}/bin/hello", .{prefix_path});
+    var verify_buf: [fs.max_path_bytes]u8 = undefined;
+    const hello_gone = blk: {
+        _ = fs.readLinkAbsolute(hello_link, &verify_buf) catch |err| {
+            break :blk err == error.FileNotFound;
+        };
+        break :blk false;
+    };
+    try std.testing.expect(hello_gone);
+
+    // goodbye (owned by foo/1.0.1) must survive.
+    var goodbye_buf: [fs.max_path_bytes]u8 = undefined;
+    const goodbye_link = try std.fmt.bufPrint(&goodbye_buf, "{s}/bin/goodbye", .{prefix_path});
+    var verify_buf2: [fs.max_path_bytes]u8 = undefined;
+    _ = try fs.readLinkAbsolute(goodbye_link, &verify_buf2);
+}
+
+test "unlink removes opt link with relative target" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("Cellar/foo/1.0");
+    try tmp.dir.makePath("opt");
+    try tmp.dir.symLink("../Cellar/foo/1.0", "opt/foo", .{});
+
+    var prefix_buf: [fs.max_path_bytes]u8 = undefined;
+    const prefix_path = try tmp.dir.realpath(".", &prefix_buf);
+
+    var keg_buf: [fs.max_path_bytes]u8 = undefined;
+    const keg_path = try tmp.dir.realpath("Cellar/foo/1.0", &keg_buf);
+
+    const linker = Linker.init(std.testing.allocator, prefix_path);
+    try linker.unlink(keg_path);
+
+    var opt_link_buf: [fs.max_path_bytes]u8 = undefined;
+    const opt_link_path = try std.fmt.bufPrint(&opt_link_buf, "{s}/opt/foo", .{prefix_path});
+
+    var verify_buf: [fs.max_path_bytes]u8 = undefined;
+    _ = fs.readLinkAbsolute(opt_link_path, &verify_buf) catch |err| {
+        try std.testing.expect(err == error.FileNotFound);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "isUnderKeg boundary semantics" {
+    try std.testing.expect(isUnderKeg("/p/Cellar/foo/1.0", "/p/Cellar/foo/1.0"));
+    try std.testing.expect(isUnderKeg("/p/Cellar/foo/1.0/bin/hello", "/p/Cellar/foo/1.0"));
+    try std.testing.expect(!isUnderKeg("/p/Cellar/foo/1.0.1/bin/hello", "/p/Cellar/foo/1.0"));
+    try std.testing.expect(!isUnderKeg("/p/Cellar/bar/1.0", "/p/Cellar/foo/1.0"));
+    try std.testing.expect(!isUnderKeg("/other", "/p/Cellar/foo/1.0"));
 }
 
 test "parseKegName extracts name from keg path" {
