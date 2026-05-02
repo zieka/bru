@@ -11,7 +11,7 @@ const FormulaInfo = formula_mod.FormulaInfo;
 
 pub const IndexHeader = extern struct {
     magic: [4]u8 = .{ 'B', 'R', 'U', 'I' },
-    version: u32 = 3,
+    version: u32 = 4,
     source_hash: [32]u8 = .{0} ** 32,
     entry_count: u32 = 0,
     _pad: [4]u8 = .{0} ** 4,
@@ -131,6 +131,7 @@ pub const Index = struct {
             if (f.disabled) flags |= 4;
             if (f.bottle_root_url.len > 0) flags |= 8;
             if (f.has_head) flags |= 16;
+            if (f.post_install_defined) flags |= 32;
 
             entries[i] = IndexEntry{
                 .name_offset = try stb.addString(allocator, f.name),
@@ -288,6 +289,11 @@ pub const Index = struct {
         return mem.bytesToValue(IndexEntry, self.data[off..][0..@sizeOf(IndexEntry)]);
     }
 
+    /// Returns true if the formula's post_install block is defined upstream.
+    pub fn postInstallDefined(_: *const Index, entry: IndexEntry) bool {
+        return (entry.flags & 32) != 0;
+    }
+
     /// Retrieve a null-terminated string from the string table.
     /// `offset` is relative to the start of the string table.
     pub fn getString(self: *const Index, offset: u32) []const u8 {
@@ -421,7 +427,7 @@ pub const Index = struct {
 
         // Reject incompatible index versions (e.g. v1 without caveats/has_head).
         const ver = mem.readInt(u32, data[4..8], .little);
-        if (ver != 3) {
+        if (ver != 4) {
             posix.munmap(mapped);
             return null;
         }
@@ -525,6 +531,7 @@ test "build and lookup" {
         .bottle_root_url = "https://ghcr.io/v2/homebrew/core",
         .bottle_sha256 = "abc123",
         .bottle_cellar = ":any",
+        .post_install_defined = false,
     };
 
     const formulae = [_]FormulaInfo{formula};
@@ -603,6 +610,7 @@ test "lookup missing returns null" {
         .bottle_root_url = "",
         .bottle_sha256 = "",
         .bottle_cellar = "",
+        .post_install_defined = false,
     };
 
     const formulae = [_]FormulaInfo{formula};
@@ -684,6 +692,64 @@ test "loadOrBuild from real cache" {
     try std.testing.expectEqualStrings("bat", idx.getString(entry.name_offset));
 }
 
+test "index round-trips post_install_defined" {
+    const allocator = std.testing.allocator;
+    const formula_pi = FormulaInfo{
+        .name = "node",
+        .full_name = "node",
+        .desc = "JS",
+        .homepage = "",
+        .license = "",
+        .version = "21.0.0",
+        .revision = 0,
+        .tap = "homebrew/core",
+        .keg_only = false,
+        .deprecated = false,
+        .disabled = false,
+        .has_head = false,
+        .caveats = "",
+        .dependencies = &.{},
+        .build_dependencies = &.{},
+        .oldnames = &.{},
+        .deprecation_replacement = "",
+        .bottle_root_url = "",
+        .bottle_sha256 = "",
+        .bottle_cellar = "",
+        .post_install_defined = true,
+    };
+    const formula_no_pi = FormulaInfo{
+        .name = "tree",
+        .full_name = "tree",
+        .desc = "List",
+        .homepage = "",
+        .license = "",
+        .version = "2.1.0",
+        .revision = 0,
+        .tap = "homebrew/core",
+        .keg_only = false,
+        .deprecated = false,
+        .disabled = false,
+        .has_head = false,
+        .caveats = "",
+        .dependencies = &.{},
+        .build_dependencies = &.{},
+        .oldnames = &.{},
+        .deprecation_replacement = "",
+        .bottle_root_url = "",
+        .bottle_sha256 = "",
+        .bottle_cellar = "",
+        .post_install_defined = false,
+    };
+    const formulae = [_]FormulaInfo{ formula_pi, formula_no_pi };
+    var idx = try Index.build(allocator, &formulae);
+    defer idx.deinit();
+
+    const e_pi = idx.lookup("node") orelse return error.TestUnexpectedResult;
+    const e_no = idx.lookup("tree") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(idx.postInstallDefined(e_pi));
+    try std.testing.expect(!idx.postInstallDefined(e_no));
+}
+
 test "lookupByOldname finds renamed formula" {
     const allocator = std.testing.allocator;
 
@@ -709,6 +775,7 @@ test "lookupByOldname finds renamed formula" {
         .bottle_cellar = "",
         .oldnames = &old,
         .deprecation_replacement = "",
+        .post_install_defined = false,
     };
 
     const formulae = [_]FormulaInfo{formula};

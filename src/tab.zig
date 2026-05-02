@@ -21,6 +21,8 @@ pub const Tab = struct {
     compiler: []const u8,
     homebrew_version: []const u8,
     source_tap: []const u8,
+    post_install_outcome: ?[]const u8 = null,
+    post_install_error: ?[]const u8 = null,
 
     /// Attempt to load and parse a Tab from a keg directory.
     /// Expects {keg_path}/INSTALL_RECEIPT.json to exist.
@@ -161,10 +163,20 @@ pub const Tab = struct {
         try writer.writeAll("],\n");
 
         if (self.source_tap.len > 0) {
-            try writer.print("  \"source\": {{\"spec\": \"stable\", \"tap\": \"{s}\"}}\n", .{self.source_tap});
+            try writer.print("  \"source\": {{\"spec\": \"stable\", \"tap\": \"{s}\"}},\n", .{self.source_tap});
         } else {
-            try writer.writeAll("  \"source\": {\"spec\": \"stable\"}\n");
+            try writer.writeAll("  \"source\": {\"spec\": \"stable\"},\n");
         }
+        try writer.writeAll("  \"bru\": {");
+        if (self.post_install_outcome) |o| {
+            try writer.print("\"post_install_outcome\": \"{s}\"", .{o});
+            if (self.post_install_error) |e| {
+                try writer.writeAll(", \"post_install_error\": \"");
+                try writeJsonEscaped(writer, e);
+                try writer.writeAll("\"");
+            }
+        }
+        try writer.writeAll("}\n");
         try writer.writeAll("}\n");
 
         const file = try std.fs.createFileAbsolute(receipt_path, .{});
@@ -411,4 +423,37 @@ test "Tab writeToKeg escapes special characters" {
     const tab2 = Tab.loadFromKeg(allocator, tmp_path) orelse return error.TestUnexpectedResult;
     defer tab2.deinit(allocator);
     try std.testing.expectEqualStrings("bru \"test\" 0.1.0", tab2.homebrew_version);
+}
+
+test "Tab writeToKeg includes bru.post_install_outcome when set" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &real_path_buf);
+
+    const tab = Tab{
+        .installed_on_request = true,
+        .poured_from_bottle = true,
+        .loaded_from_api = true,
+        .time = 1700000000,
+        .runtime_dependencies = &.{},
+        .compiler = "clang",
+        .homebrew_version = "bru 0.1.0",
+        .source_tap = "homebrew/core",
+        .post_install_outcome = "ran",
+        .post_install_error = null,
+    };
+    try tab.writeToKeg(allocator, tmp_path);
+
+    // Read raw file and check for the bru block.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const receipt_path = try std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{tmp_path});
+    const f = try std.fs.openFileAbsolute(receipt_path, .{});
+    defer f.close();
+    const content = try f.readToEndAlloc(allocator, 1 << 16);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"bru\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"post_install_outcome\": \"ran\"") != null);
 }

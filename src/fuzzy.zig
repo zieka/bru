@@ -140,6 +140,7 @@ test "findSimilar returns close matches" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "cat",
@@ -162,6 +163,7 @@ test "findSimilar returns close matches" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "zzz",
@@ -184,6 +186,7 @@ test "findSimilar returns close matches" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
     };
 

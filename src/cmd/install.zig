@@ -21,6 +21,7 @@ const HttpClient = @import("../http.zig").HttpClient;
 const batch_download = @import("../batch_download.zig");
 const cask_mod = @import("../cask.zig");
 const cask_install = @import("../cask_install.zig");
+const post_install = @import("../post_install.zig");
 
 /// Install one or more formulae or casks.
 ///
@@ -296,6 +297,37 @@ fn installOne(allocator: Allocator, name: []const u8, is_cask: bool, args: []con
     };
     try tab.writeToKeg(allocator, keg_path);
     receipt_timer.stop();
+
+    // 11.5. Run post_install if defined.
+    var pi_timer = Timer.start(&trace, "post_install");
+    const pi_result = try post_install.run(
+        allocator,
+        config,
+        name,
+        pkg_version,
+        keg_path,
+        idx.postInstallDefined(entry),
+    );
+    defer pi_result.free(allocator);
+    pi_timer.stop();
+
+    if (pi_result.outcome == .failed) {
+        err_out.warn(
+            "post_install for {s} failed. Package installed but may need manual setup.\nLog: {s}",
+            .{ name, pi_result.log_path orelse "(no log)" },
+        );
+    } else if (pi_result.outcome == .skipped_no_ruby) {
+        err_out.warn(
+            "Ruby not found at {s}; post_install for {s} skipped. Set --use-system-ruby=<path> or BRU_NO_POST_INSTALL=1 to silence.",
+            .{ config.ruby_path, name },
+        );
+    }
+
+    // 11.75. Update tab with post_install outcome.
+    var tab_with_pi = tab;
+    tab_with_pi.post_install_outcome = pi_result.outcome.toString();
+    tab_with_pi.post_install_error = pi_result.error_summary;
+    try tab_with_pi.writeToKeg(allocator, keg_path);
 
     // 12. Link into prefix.
     var link_timer = Timer.start(&trace, "link");

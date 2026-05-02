@@ -384,6 +384,8 @@ test "findPlist returns null for nonexistent formula" {
         .debug = false,
         .quiet = false,
         .timing = false,
+        .no_post_install = false,
+        .ruby_path = "/usr/bin/ruby",
         .allocator = allocator,
     };
     const result = findPlist(allocator, config, "nonexistent_formula_xyz");

@@ -15,6 +15,8 @@ pub const Config = struct {
     debug: bool,
     quiet: bool,
     timing: bool,
+    no_post_install: bool,
+    ruby_path: []const u8,
 
     allocator: Allocator,
 
@@ -73,6 +75,8 @@ pub const Config = struct {
             .debug = false,
             .quiet = false,
             .timing = false,
+            .no_post_install = envBool("BRU_NO_POST_INSTALL"),
+            .ruby_path = "/usr/bin/ruby",
             .allocator = allocator,
         };
     }
@@ -141,4 +145,18 @@ test "config loadFromKeg returns null for nonexistent" {
 
     const result = cfg.loadFromKeg("nonexistent-package-xyz");
     try std.testing.expect(result == null);
+}
+
+test "config defaults post_install opt-in fields" {
+    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_instance.deinit();
+    const allocator = gpa_instance.allocator();
+    var cfg = try Config.load(allocator);
+    defer cfg.deinit();
+
+    // BRU_NO_POST_INSTALL not set in test env; default should be false.
+    if (std.posix.getenv("BRU_NO_POST_INSTALL") == null) {
+        try std.testing.expect(!cfg.no_post_install);
+    }
+    try std.testing.expectEqualStrings("/usr/bin/ruby", cfg.ruby_path);
 }

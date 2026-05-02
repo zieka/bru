@@ -153,6 +153,7 @@ test "findUses returns formulae that depend on target" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "git",
@@ -175,6 +176,7 @@ test "findUses returns formulae that depend on target" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "libgit2",
@@ -197,6 +199,7 @@ test "findUses returns formulae that depend on target" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
     };
 
