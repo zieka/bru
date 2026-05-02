@@ -52,6 +52,8 @@ pub const ParsedArgs = struct {
     timing: bool,
     help: bool,
     version: bool,
+    no_post_install: bool,
+    ruby_path: ?[]const u8,
 };
 
 /// Signature for built-in command handler functions.
@@ -130,6 +132,8 @@ pub fn parseArgs(argv: []const []const u8) ParsedArgs {
         .timing = false,
         .help = false,
         .version = false,
+        .no_post_install = false,
+        .ruby_path = null,
     };
 
     if (argv.len <= 1) return result;
@@ -168,6 +172,16 @@ pub fn parseArgs(argv: []const []const u8) ParsedArgs {
         }
         if (std.mem.eql(u8, arg, "--version")) {
             result.version = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-post-install")) {
+            result.no_post_install = true;
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+            result.ruby_path = arg["--use-system-ruby=".len..];
             i += 1;
             continue;
         }

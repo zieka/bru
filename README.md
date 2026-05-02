@@ -33,6 +33,7 @@ bru rollback ripgrep
 - **bundle** — export and install from Brewfiles
 - **rollback** — revert a formula to its previous version
 - **self-update** — update bru itself
+- **post_install execution** — runs Homebrew `post_install` Ruby blocks via the system Ruby (`/usr/bin/ruby` on macOS), so packages like `node`, `openssl`, `fontconfig`, and `ca-certificates` are fully configured at install time. Disable per-invocation with `--no-post-install`, override the Ruby path with `--use-system-ruby=<path>`, or set `BRU_NO_POST_INSTALL=1`. Failures are logged to `<cache>/post-install-logs/` and never block the install.
 
 Anything not implemented natively falls back to the real `brew` binary.
 

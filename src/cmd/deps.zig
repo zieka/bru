@@ -276,6 +276,7 @@ test "collectTransitiveDeps builds full closure" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "b",
@@ -298,6 +299,7 @@ test "collectTransitiveDeps builds full closure" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
         .{
             .name = "c",
@@ -320,6 +322,7 @@ test "collectTransitiveDeps builds full closure" {
             .bottle_root_url = "",
             .bottle_sha256 = "",
             .bottle_cellar = "",
+            .post_install_defined = false,
         },
     };
 

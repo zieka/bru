@@ -39,6 +39,8 @@ fn run(allocator: std.mem.Allocator) !void {
     if (parsed.debug) cfg.debug = true;
     if (parsed.quiet) cfg.quiet = true;
     if (parsed.timing) cfg.timing = true;
+    if (parsed.no_post_install) cfg.no_post_install = true;
+    if (parsed.ruby_path) |p| cfg.ruby_path = p;
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -150,5 +152,7 @@ test {
     _ = @import("clonefile.zig");
     _ = @import("tap_migrations.zig");
     _ = @import("state.zig");
+    _ = @import("formula_rb.zig");
+    _ = @import("post_install.zig");
 
 }

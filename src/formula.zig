@@ -24,6 +24,7 @@ pub const FormulaInfo = struct {
     bottle_root_url: []const u8,
     bottle_sha256: []const u8,
     bottle_cellar: []const u8,
+    post_install_defined: bool,
 };
 
 /// Returns the Homebrew bottle platform tag for the current compilation target.
@@ -154,6 +155,7 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform_tags:
     const keg_only = jsonBool(obj, "keg_only") orelse false;
     const deprecated = jsonBool(obj, "deprecated") orelse false;
     const disabled = jsonBool(obj, "disabled") orelse false;
+    const post_install_defined = jsonBool(obj, "post_install_defined") orelse false;
 
     const caveats = try allocator.dupe(u8, jsonStr(obj, "caveats") orelse "");
     errdefer allocator.free(caveats);
@@ -236,6 +238,7 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform_tags:
         .bottle_root_url = bottle_root_url,
         .bottle_sha256 = bottle_sha256,
         .bottle_cellar = bottle_cellar,
+        .post_install_defined = post_install_defined,
     };
 }
 
@@ -499,6 +502,49 @@ test "parseFormulaJson parses oldnames and replacement" {
     try std.testing.expectEqual(@as(usize, 1), formulae[0].oldnames.len);
     try std.testing.expectEqualStrings("gnome-icon-theme", formulae[0].oldnames[0]);
     try std.testing.expectEqualStrings("", formulae[0].deprecation_replacement);
+}
+
+test "parseFormulaJson extracts post_install_defined" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\[{
+        \\  "name": "node",
+        \\  "full_name": "node",
+        \\  "desc": "JS runtime",
+        \\  "homepage": "",
+        \\  "license": "",
+        \\  "versions": {"stable": "21.0.0"},
+        \\  "revision": 0,
+        \\  "tap": "homebrew/core",
+        \\  "post_install_defined": true,
+        \\  "dependencies": [],
+        \\  "build_dependencies": [],
+        \\  "oldnames": [],
+        \\  "caveats": null
+        \\},{
+        \\  "name": "tree",
+        \\  "full_name": "tree",
+        \\  "desc": "List dirs",
+        \\  "homepage": "",
+        \\  "license": "",
+        \\  "versions": {"stable": "2.1.0"},
+        \\  "revision": 0,
+        \\  "tap": "homebrew/core",
+        \\  "post_install_defined": false,
+        \\  "dependencies": [],
+        \\  "build_dependencies": [],
+        \\  "oldnames": [],
+        \\  "caveats": null
+        \\}]
+    ;
+    const formulae = try parseFormulaJson(allocator, json);
+    defer {
+        for (formulae) |f| freeFormula(allocator, f);
+        allocator.free(formulae);
+    }
+    try std.testing.expectEqual(@as(usize, 2), formulae.len);
+    try std.testing.expect(formulae[0].post_install_defined);
+    try std.testing.expect(!formulae[1].post_install_defined);
 }
 
 test "parseFormulaJson resolves platform-independent 'all' bottles" {
