@@ -10,7 +10,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\Core commands:
         \\  install    Install a formula or cask
         \\  uninstall  Uninstall a formula
-        \\  upgrade    Upgrade outdated formulae
+        \\  upgrade    Upgrade outdated formulae and casks
         \\  update     Fetch latest formulae data
         \\  search     Search for formulae
         \\  info       Show formula info
@@ -44,7 +44,7 @@ pub fn printGeneralHelp(stdout: anytype) !void {
         \\
         \\Maintenance commands:
         \\  cleanup    Remove old versions and stale downloads
-        \\  outdated   Show outdated formulae
+        \\  outdated   Show outdated formulae and casks
         \\  fetch      Download a formula without installing
         \\  config     Show Homebrew configuration
         \\  log        Show the git log for a formula or cask
@@ -182,9 +182,18 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "upgrade",
-            \\Usage: bru upgrade [<formula>]
+            \\Usage: bru upgrade [--formula|--cask] [<name> ...]
             \\
-            \\Upgrade outdated formulae. Delegates to brew for the actual upgrade.
+            \\Upgrade outdated formulae and casks.
+            \\
+            \\Options:
+            \\  --formula, --formulae  Only upgrade formulae
+            \\  --cask,    --casks     Only upgrade casks
+            \\
+            \\With no names, upgrades all outdated packages of the selected type
+            \\(both formulae and casks by default). With names, each is auto-routed
+            \\based on whether it lives in the Cellar or Caskroom; force the type
+            \\with --formula or --cask.
             \\
         },
         .{ "update",
@@ -194,12 +203,15 @@ fn getCommandHelp(command: []const u8) ?[]const u8 {
             \\
         },
         .{ "outdated",
-            \\Usage: bru outdated [--json]
+            \\Usage: bru outdated [--verbose] [--json] [--formula|--cask]
             \\
-            \\Show formulae with available upgrades.
+            \\Show formulae and casks with available upgrades.
             \\
             \\Options:
-            \\  --json  Output as JSON
+            \\  --verbose, -v          Show "name (installed) < latest" for each entry
+            \\  --json                 Output as JSON; each entry has a "cask" boolean
+            \\  --formula, --formulae  Only check formulae
+            \\  --cask,    --casks     Only check casks
             \\
         },
         .{ "cleanup",
