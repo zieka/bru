@@ -12,22 +12,36 @@ const ResolvedCask = cask.ResolvedCask;
 const BinaryArtifact = cask.BinaryArtifact;
 
 /// Install a cask: download archive, extract, stage binaries, and link.
-pub fn installCask(allocator: Allocator, config: Config, http_client: *HttpClient, resolved: ResolvedCask) !void {
+///
+/// When `upgrade_from` is null this is a fresh install and fails if the cask
+/// is already in the caskroom. When `upgrade_from` is a version string the
+/// "already installed" guard is skipped; after the new version is linked the
+/// old version's symlinks are unlinked and its caskroom directory is removed.
+pub fn installCask(
+    allocator: Allocator,
+    config: Config,
+    http_client: *HttpClient,
+    resolved: ResolvedCask,
+    upgrade_from: ?[]const u8,
+) !void {
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
 
-    // 1. Check if already installed.
-    var caskroom_check_buf: [fs.max_path_bytes]u8 = undefined;
-    const caskroom_check = std.fmt.bufPrint(&caskroom_check_buf, "{s}/{s}", .{ config.caskroom, resolved.token }) catch unreachable;
-    if (fs.openDirAbsolute(caskroom_check, .{})) |dir| {
-        var d = dir;
-        d.close();
-        out.warn("{s} is already installed.", .{resolved.token});
-        return;
-    } else |_| {}
+    // 1. Check if already installed (skip for upgrades).
+    if (upgrade_from == null) {
+        var caskroom_check_buf: [fs.max_path_bytes]u8 = undefined;
+        const caskroom_check = std.fmt.bufPrint(&caskroom_check_buf, "{s}/{s}", .{ config.caskroom, resolved.token }) catch unreachable;
+        if (fs.openDirAbsolute(caskroom_check, .{})) |dir| {
+            var d = dir;
+            d.close();
+            out.warn("{s} is already installed.", .{resolved.token});
+            return;
+        } else |_| {}
+    }
 
     // 2. Print section header.
-    const install_title = try std.fmt.allocPrint(allocator, "Installing {s} {s}", .{ resolved.name, resolved.version });
+    const action = if (upgrade_from != null) "Upgrading" else "Installing";
+    const install_title = try std.fmt.allocPrint(allocator, "{s} {s} {s}", .{ action, resolved.name, resolved.version });
     defer allocator.free(install_title);
     out.section(install_title);
 
@@ -74,12 +88,37 @@ pub fn installCask(allocator: Allocator, config: Config, http_client: *HttpClien
         }
     }
 
-    // 7. Link into prefix.
+    // 7. Link into prefix. For upgrades, first unlink the old version's
+    //    symlinks so the new link can replace them cleanly.
     var linker = Linker.init(allocator, config.prefix);
+
+    if (upgrade_from) |old_version| {
+        if (!mem.eql(u8, old_version, resolved.version)) {
+            const old_version_dir = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ config.caskroom, resolved.token, old_version });
+            defer allocator.free(old_version_dir);
+            linker.unlink(old_version_dir) catch |unlink_err| {
+                err_out.warn("Failed to unlink old {s} {s}: {s}", .{ resolved.token, old_version, @errorName(unlink_err) });
+            };
+        }
+    }
+
     try linker.link(resolved.token, version_dir);
 
-    // 8. Print completion.
-    const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is installed", .{ resolved.name, resolved.version });
+    // 8. For upgrades, remove the old caskroom version dir now that the new
+    //    one is linked.
+    if (upgrade_from) |old_version| {
+        if (!mem.eql(u8, old_version, resolved.version)) {
+            const old_version_dir = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ config.caskroom, resolved.token, old_version });
+            defer allocator.free(old_version_dir);
+            fs.deleteTreeAbsolute(old_version_dir) catch |del_err| {
+                err_out.warn("Failed to remove old {s} {s}: {s}", .{ resolved.token, old_version, @errorName(del_err) });
+            };
+        }
+    }
+
+    // 9. Print completion.
+    const done_verb = if (upgrade_from != null) "upgraded" else "installed";
+    const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is {s}", .{ resolved.name, resolved.version, done_verb });
     defer allocator.free(done_title);
     out.section(done_title);
 }
