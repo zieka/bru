@@ -10,6 +10,10 @@ const Output = @import("output.zig").Output;
 const cask = @import("cask.zig");
 const ResolvedCask = cask.ResolvedCask;
 const BinaryArtifact = cask.BinaryArtifact;
+const AppArtifact = cask.AppArtifact;
+
+/// Default destination for app bundles. Matches Homebrew's default `appdir`.
+const default_appdir: []const u8 = "/Applications";
 
 /// Install a cask: download archive, extract, stage binaries, and link.
 ///
@@ -86,6 +90,21 @@ pub fn installCask(
                 err_out.warn("Could not stage binary \"{s}\": {s}", .{ binary.target, @errorName(stage_err) });
             };
         }
+    }
+
+    // 6b. Stage app bundles into /Applications and leave a back-symlink in
+    //     the Caskroom (matching brew's default behaviour).
+    for (resolved.apps) |app| {
+        stageApp(allocator, version_dir, default_appdir, app) catch |stage_err| switch (stage_err) {
+            error.AppAlreadyInstalled => err_out.warn(
+                "{s} already exists in {s} — leaving it in place.",
+                .{ app.target, default_appdir },
+            ),
+            else => err_out.warn(
+                "Could not stage app \"{s}\": {s}",
+                .{ app.target, @errorName(stage_err) },
+            ),
+        };
     }
 
     // 7. Link into prefix. For upgrades, first unlink the old version's
@@ -200,6 +219,74 @@ fn extractTar(allocator: Allocator, tar_path: []const u8, dest_dir: []const u8) 
         .Exited => |code| if (code != 0) return error.TarFailed,
         else => return error.TarFailed,
     }
+}
+
+/// Stage a single app-bundle artifact:
+///   1. Verify the extracted source bundle exists.
+///   2. Move it from `{version_dir}/{app.source}` to `{appdir}/{app.target}`
+///      using rename (same-volume) or `ditto`+`rm -rf` (cross-volume fallback).
+///   3. Leave a back-symlink at `{version_dir}/{app.target}` pointing to the
+///      installed bundle — this matches brew's default Caskroom layout and
+///      lets future correctness checks find the bundle via either path.
+/// Returns `error.AppAlreadyInstalled` if the destination already exists,
+/// so callers can warn-but-continue (brew does the same).
+fn stageApp(allocator: Allocator, version_dir: []const u8, appdir: []const u8, app: AppArtifact) !void {
+    const source_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, app.source });
+    defer allocator.free(source_path);
+
+    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ appdir, app.target });
+    defer allocator.free(target_path);
+
+    fs.cwd().access(source_path, .{}) catch {
+        return error.AppNotFound;
+    };
+
+    // If destination already exists, treat as already-installed (warn, don't
+    // overwrite — brew default).
+    if (fs.cwd().access(target_path, .{})) |_| {
+        return error.AppAlreadyInstalled;
+    } else |_| {}
+
+    // Same-volume rename first; if that fails (e.g. EXDEV across volumes),
+    // fall back to a recursive copy that preserves extended attributes
+    // (quarantine flags etc.) then delete the source.
+    if (fs.renameAbsolute(source_path, target_path)) |_| {
+        // ok
+    } else |rename_err| switch (rename_err) {
+        error.RenameAcrossMountPoints => try copyAppCrossVolume(allocator, source_path, target_path),
+        else => return rename_err,
+    }
+
+    // Back-symlink {version_dir}/{target} -> {appdir}/{target}.
+    const back_link = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, app.target });
+    defer allocator.free(back_link);
+    fs.deleteFileAbsolute(back_link) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir => {},
+        else => return err,
+    };
+    try fs.symLinkAbsolute(target_path, back_link, .{});
+}
+
+/// Recursively copy an .app bundle across volumes using `ditto`, then remove
+/// the source. `ditto` preserves resource forks, ACLs, and extended attrs —
+/// `cp -R` does not, so don't substitute it.
+fn copyAppCrossVolume(allocator: Allocator, src: []const u8, dst: []const u8) !void {
+    const ditto = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "ditto", src, dst },
+    });
+    defer allocator.free(ditto.stdout);
+    defer allocator.free(ditto.stderr);
+    switch (ditto.term) {
+        .Exited => |code| if (code != 0) return error.AppCopyFailed,
+        else => return error.AppCopyFailed,
+    }
+    const rm = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "rm", "-rf", src },
+    });
+    defer allocator.free(rm.stdout);
+    defer allocator.free(rm.stderr);
 }
 
 /// Stage a single binary artifact: find it in the extracted tree and

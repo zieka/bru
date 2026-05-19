@@ -396,10 +396,13 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
     };
     defer cask_mod.freeResolvedCask(allocator, resolved);
 
-    // Check if this cask has any binary artifacts.
-    if (resolved.binaries.len == 0) {
-        err_out.warn("No CLI binaries for cask \"{s}\".", .{name});
-        err_out.print("This cask provides only a GUI application.\n", .{});
+    // Only bail when the cask declares neither CLI binaries nor app
+    // bundles — those are the two artifact kinds bru can install. (Casks
+    // limited to `pkg`/`installer`/`font` artifacts still fall through to
+    // a real brew install via the `Use: brew install --cask ...` hint.)
+    if (resolved.binaries.len == 0 and resolved.apps.len == 0) {
+        err_out.warn("No installable artifacts for cask \"{s}\".", .{name});
+        err_out.print("This cask uses an artifact type bru can't handle yet (e.g. pkg, font).\n", .{});
         err_out.print("Use: brew install --cask {s}\n", .{name});
         return;
     }
