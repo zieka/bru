@@ -149,6 +149,14 @@ pub const BinaryArtifact = struct {
     target: []const u8, // symlink name for bin/, e.g., "firefox"
 };
 
+/// An app-bundle artifact (`Some.app`) extracted from a cask's artifacts.
+/// brew moves `source` from the staged Caskroom version dir into `/Applications`
+/// (renamed to `target`), then leaves a back-symlink in the Caskroom.
+pub const AppArtifact = struct {
+    source: []const u8, // bundle name inside the archive, e.g., "Rectangle.app"
+    target: []const u8, // destination basename in /Applications, e.g., "Rectangle.app"
+};
+
 /// Resolved metadata for installing a single cask, fetched from per-cask API.
 pub const ResolvedCask = struct {
     token: []const u8,
@@ -157,6 +165,7 @@ pub const ResolvedCask = struct {
     sha256: []const u8,
     name: []const u8,
     binaries: []BinaryArtifact,
+    apps: []AppArtifact,
 };
 
 /// Platform tags to try when resolving cask variations, in priority order.
@@ -273,6 +282,16 @@ pub fn parseResolvedCask(allocator: Allocator, json_bytes: []const u8) !Resolved
 
     // Parse binary artifacts from the artifacts array.
     const binaries = try parseBinaryArtifacts(allocator, obj);
+    errdefer {
+        for (binaries) |b| {
+            allocator.free(b.source);
+            allocator.free(b.target);
+        }
+        allocator.free(binaries);
+    }
+
+    // Parse app-bundle artifacts (e.g. `app "Rectangle.app"`).
+    const apps = try parseAppArtifacts(allocator, obj);
 
     return ResolvedCask{
         .token = result_token,
@@ -281,6 +300,7 @@ pub fn parseResolvedCask(allocator: Allocator, json_bytes: []const u8) !Resolved
         .sha256 = sha256,
         .name = result_name,
         .binaries = binaries,
+        .apps = apps,
     };
 }
 
@@ -350,6 +370,66 @@ fn parseBinaryArtifacts(allocator: Allocator, obj: std.json.ObjectMap) ![]Binary
     return try result.toOwnedSlice(allocator);
 }
 
+/// Parse app-bundle artifacts from a cask's artifacts array.
+/// App artifacts look like:
+///   - {"app": ["Rectangle.app"]}                       -> source/target = "Rectangle.app"
+///   - {"app": ["Source.app", {"target": "Dest.app"}]}  -> source/target may differ
+fn parseAppArtifacts(allocator: Allocator, obj: std.json.ObjectMap) ![]AppArtifact {
+    const artifacts_val = obj.get("artifacts") orelse return try allocator.alloc(AppArtifact, 0);
+    const artifacts_arr = switch (artifacts_val) {
+        .array => |a| a,
+        else => return try allocator.alloc(AppArtifact, 0),
+    };
+
+    var result = std.ArrayList(AppArtifact){};
+    errdefer {
+        for (result.items) |a| {
+            allocator.free(a.source);
+            allocator.free(a.target);
+        }
+        result.deinit(allocator);
+    }
+
+    for (artifacts_arr.items) |artifact_val| {
+        const artifact_obj = switch (artifact_val) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        const app_val = artifact_obj.get("app") orelse continue;
+        const app_arr = switch (app_val) {
+            .array => |a| a,
+            else => continue,
+        };
+        if (app_arr.items.len == 0) continue;
+
+        const source_raw = switch (app_arr.items[0]) {
+            .string => |s| s,
+            else => continue,
+        };
+        const source_clean = cleanArtifactPath(source_raw);
+
+        const source = try allocator.dupe(u8, source_clean);
+        errdefer allocator.free(source);
+
+        const target = blk: {
+            if (app_arr.items.len > 1) {
+                if (asObject(app_arr.items[1])) |target_obj| {
+                    if (jsonStr(target_obj, "target")) |t| {
+                        break :blk try allocator.dupe(u8, t);
+                    }
+                }
+            }
+            // Default target = basename of source (most casks use this).
+            break :blk try allocator.dupe(u8, std.fs.path.basename(source_clean));
+        };
+
+        try result.append(allocator, .{ .source = source, .target = target });
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
 /// Strip known prefixes from cask binary artifact paths.
 /// Removes "$HOMEBREW_PREFIX/Caskroom/{token}/{version}/" and "$APPDIR/" prefixes.
 fn cleanArtifactPath(path: []const u8) []const u8 {
@@ -390,6 +470,11 @@ pub fn freeResolvedCask(allocator: Allocator, c: ResolvedCask) void {
         allocator.free(b.target);
     }
     allocator.free(c.binaries);
+    for (c.apps) |a| {
+        allocator.free(a.source);
+        allocator.free(a.target);
+    }
+    allocator.free(c.apps);
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +638,34 @@ test "parseResolvedCask with no binary artifacts" {
     defer freeResolvedCask(allocator, resolved);
 
     try std.testing.expectEqual(@as(usize, 0), resolved.binaries.len);
+    try std.testing.expectEqual(@as(usize, 1), resolved.apps.len);
+    try std.testing.expectEqualStrings("Google Chrome.app", resolved.apps[0].source);
+    try std.testing.expectEqualStrings("Google Chrome.app", resolved.apps[0].target);
+}
+
+test "parseResolvedCask app artifact with target rename" {
+    const allocator = std.testing.allocator;
+
+    const json_bytes =
+        \\{
+        \\  "token": "renamed",
+        \\  "name": ["Renamed"],
+        \\  "url": "https://example.com/renamed.dmg",
+        \\  "version": "1.0",
+        \\  "sha256": "no_check",
+        \\  "variations": {},
+        \\  "artifacts": [
+        \\    {"app": ["Source.app", {"target": "Dest.app"}]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCask(allocator, json_bytes);
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.apps.len);
+    try std.testing.expectEqualStrings("Source.app", resolved.apps[0].source);
+    try std.testing.expectEqualStrings("Dest.app", resolved.apps[0].target);
 }
 
 test "cleanArtifactPath strips APPDIR prefix" {

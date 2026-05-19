@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 394" width="760" height="394">
+  <defs>
+    <style>
+      .t-title    { font: 600 22px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #0F172A; }
+      .t-subtitle { font: 400 12px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #64748B; letter-spacing: 0.02em; }
+      .t-tool     { font: 600 13px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #0F172A; }
+      .t-ver      { font: 400 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #94A3B8; }
+      .t-label-on { font: 600 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #FFFFFF; }
+      .t-label-off{ font: 600 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #0F172A; }
+      .t-warm-out { font: 600 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #B45309; }
+      .t-cold-out { font: 600 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #1D4ED8; }
+      .t-skip     { font: 400 12px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #94A3B8; font-style: italic; }
+      .t-legend   { font: 500 11px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; fill: #64748B; letter-spacing: 0.02em; }
+      .t-status-glyph { font: 700 9px -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif; }
+    </style>
+  </defs>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <title>duckdb — install benchmark</title>
+  <text class="t-title" x="32" y="44">duckdb</text>
+  <text class="t-subtitle" x="32" y="68">INSTALL BENCHMARK · COLD VS WARM CACHE</text>
+  <line x1="32" y1="92" x2="728" y2="92" stroke="#E2E8F0" stroke-width="1"/>
+  <g>
+    <text class="t-tool" x="32" y="126">brew</text>
+    <text class="t-ver"  x="32" y="142">v5.1.12-17-g3a3bc20</text>
+    <circle cx="96" cy="122" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="96" y="126" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <rect x="168" y="126" width="177" height="26" rx="4" ry="4" fill="#FBBF24"/>
+    <text class="t-label-off" x="256" y="143" text-anchor="middle">5.1s</text>
+    <rect x="347" y="126" width="382" height="26" rx="4" ry="4" fill="#3B82F6"/>
+    <text class="t-label-on" x="538" y="143" text-anchor="middle">11.0s</text>
+  </g>
+  <g>
+    <text class="t-tool" x="32" y="172">zb</text>
+    <text class="t-ver"  x="32" y="188">v0.2.1</text>
+    <circle cx="96" cy="168" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="96" y="172" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <rect x="168" y="172" width="43" height="26" rx="4" ry="4" fill="#FBBF24"/>
+    <text class="t-label-off" x="189" y="189" text-anchor="middle">1.3s</text>
+    <rect x="213" y="172" width="293" height="26" rx="4" ry="4" fill="#3B82F6"/>
+    <text class="t-label-on" x="359" y="189" text-anchor="middle">8.5s</text>
+  </g>
+  <g>
+    <text class="t-tool" x="32" y="218">nb</text>
+    <text class="t-ver"  x="32" y="234">v0.1.193</text>
+    <circle cx="96" cy="214" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="96" y="218" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <rect x="168" y="218" width="9" height="26" rx="4" ry="4" fill="#FBBF24"/>
+    <rect x="179" y="218" width="269" height="26" rx="4" ry="4" fill="#3B82F6"/>
+    <text class="t-label-on" x="313" y="235" text-anchor="middle">7.8s</text>
+    <text class="t-warm-out" x="456" y="235">260ms</text>
+  </g>
+  <g>
+    <text class="t-tool" x="32" y="264">mt</text>
+    <text class="t-ver"  x="32" y="280">v0.13.0</text>
+    <circle cx="96" cy="260" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="96" y="264" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <rect x="170" y="264" width="293" height="26" rx="4" ry="4" fill="#3B82F6"/>
+    <text class="t-label-on" x="316" y="281" text-anchor="middle">8.5s</text>
+  </g>
+  <g>
+    <text class="t-tool" x="32" y="310">bru</text>
+    <text class="t-ver"  x="32" y="326">dev</text>
+    <circle cx="96" cy="306" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="96" y="310" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <rect x="168" y="310" width="19" height="26" rx="4" ry="4" fill="#FBBF24"/>
+    <rect x="189" y="310" width="44" height="26" rx="4" ry="4" fill="#3B82F6"/>
+    <text class="t-label-on" x="211" y="327" text-anchor="middle">1.3s</text>
+    <text class="t-warm-out" x="241" y="327">555ms</text>
+  </g>
+  <g>
+    <rect x="32" y="361" width="12" height="12" rx="2" ry="2" fill="#FBBF24"/>
+    <text class="t-legend" x="50" y="371">CACHE WARM</text>
+    <rect x="162" y="361" width="12" height="12" rx="2" ry="2" fill="#3B82F6"/>
+    <text class="t-legend" x="180" y="371">CACHE COLD</text>
+    <circle cx="298" cy="367" r="6" fill="#22C55E"/>
+    <text class="t-status-glyph" x="298" y="371" text-anchor="middle" fill="#FFFFFF">✓</text>
+    <text class="t-legend" x="310" y="371">VERIFIED</text>
+    <circle cx="380" cy="367" r="6" fill="#EF4444"/>
+    <text class="t-status-glyph" x="380" y="371" text-anchor="middle" fill="#FFFFFF">!</text>
+    <text class="t-legend" x="392" y="371">BROKEN</text>
+  </g>
+</svg>
