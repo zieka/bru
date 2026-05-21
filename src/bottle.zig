@@ -202,7 +202,13 @@ pub const Bottle = struct {
         };
     }
 
-    /// Extract a .tar.gz bottle into the cellar using parallel file writes.
+    /// Extract a .tar.gz bottle into the cellar.
+    ///
+    /// Fast path: parallel native extractor. Falls back to system `tar xf`
+    /// for archives whose typeflags Zig's std.tar iterator can't handle —
+    /// notably hard links ('h'), which mingw-w64 uses for GCC's wrapper
+    /// binaries. The iterator returns error.TarUnsupportedHeader on those.
+    ///
     /// Returns the keg path (e.g., "/opt/homebrew/Cellar/bat/0.26.1").
     /// Caller owns the returned string.
     pub fn pour(self: Bottle, archive_path: []const u8, name: []const u8, version: []const u8) ![]const u8 {
@@ -212,6 +218,29 @@ pub const Bottle = struct {
             else => return err,
         };
 
+        const keg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{
+            self.cellar,
+            name,
+            version,
+        });
+        errdefer self.allocator.free(keg_path);
+
+        self.pourNative(archive_path) catch |err| switch (err) {
+            error.TarUnsupportedHeader => {
+                // Wipe the partial keg so we don't merge two half-extractions,
+                // then let GNU/BSD tar take over.
+                fs.deleteTreeAbsolute(keg_path) catch {};
+                try self.pourSystemTar(archive_path);
+            },
+            else => return err,
+        };
+
+        return keg_path;
+    }
+
+    /// Native parallel extractor — fast path. Iterates the tar entries with
+    /// std.tar.Iterator and dispatches file writes to worker threads.
+    fn pourNative(self: Bottle, archive_path: []const u8) !void {
         // Open the archive file.
         const archive_file = try fs.openFileAbsolute(archive_path, .{});
         defer archive_file.close();
@@ -302,13 +331,21 @@ pub const Bottle = struct {
 
         // Drain any remaining tasks.
         try spawnAndDrain(tasks.items, &pool);
+    }
 
-        // Construct and return the keg path.
-        return std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{
-            self.cellar,
-            name,
-            version,
+    /// Slow path: shell out to system tar. Handles every typeflag the native
+    /// extractor doesn't (hard links, sparse files, GNU extensions).
+    fn pourSystemTar(self: Bottle, archive_path: []const u8) !void {
+        const result = try std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "tar", "xf", archive_path, "-C", self.cellar },
         });
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
+        switch (result.term) {
+            .Exited => |code| if (code != 0) return error.TarFailed,
+            else => return error.TarFailed,
+        }
     }
 
     /// Extract a bottle with a two-tier extracted-keg cache.
@@ -871,6 +908,68 @@ test "pour extracts tar.gz into cellar" {
     const extracted = try tmp.dir.readFileAlloc(allocator, "cellar/bat/0.26.1/bin/bat", 1024 * 1024);
     defer allocator.free(extracted);
     try std.testing.expectEqualStrings("#!/bin/sh\necho bat\n", extracted);
+}
+
+test "pour falls back to system tar on hardlink typeflag" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Build a bottle layout with a hardlinked file. The native std.tar
+    // iterator does not understand typeflag 'h' and returns
+    // error.TarUnsupportedHeader — the fallback must take over.
+    try tmp.dir.makePath("hltest/1.0.0/bin");
+    try tmp.dir.writeFile(.{
+        .sub_path = "hltest/1.0.0/bin/original",
+        .data = "I am the source\n",
+    });
+
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try tmp.dir.realpath(".", &path_buf);
+
+    // Create a hard link with system `ln` (tmpfs may not expose linkAt).
+    const link_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "ln", "hltest/1.0.0/bin/original", "hltest/1.0.0/bin/linked" },
+        .cwd_dir = tmp.dir,
+    });
+    allocator.free(link_result.stdout);
+    allocator.free(link_result.stderr);
+
+    // Tar it up — `tar czf` emits typeflag 'h' for the hardlink entry.
+    const archive_name = "hltest-1.0.0.tar.gz";
+    const tar_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "tar", "czf", archive_name, "hltest" },
+        .cwd_dir = tmp.dir,
+    });
+    allocator.free(tar_result.stdout);
+    allocator.free(tar_result.stderr);
+
+    try tmp.dir.makeDir("cellar");
+    var cellar_buf: [fs.max_path_bytes]u8 = undefined;
+    const cellar_path = try tmp.dir.realpath("cellar", &cellar_buf);
+
+    const archive_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ tmp_path, archive_name });
+    defer allocator.free(archive_path);
+
+    const bottle = Bottle{
+        .allocator = allocator,
+        .cellar = cellar_path,
+        .prefix = "/opt/homebrew",
+    };
+
+    const keg_path = try bottle.pour(archive_path, "hltest", "1.0.0");
+    defer allocator.free(keg_path);
+
+    // Both files should exist and have identical content after fallback.
+    const original = try tmp.dir.readFileAlloc(allocator, "cellar/hltest/1.0.0/bin/original", 1024);
+    defer allocator.free(original);
+    const linked = try tmp.dir.readFileAlloc(allocator, "cellar/hltest/1.0.0/bin/linked", 1024);
+    defer allocator.free(linked);
+    try std.testing.expectEqualStrings("I am the source\n", original);
+    try std.testing.expectEqualStrings("I am the source\n", linked);
 }
 
 test "writeWorker writes files from tasks" {
