@@ -61,39 +61,29 @@ pub fn installCask(
     try fs.cwd().makePath(version_dir);
 
     // 5. Determine archive type and extract.
-    const ext = Download.urlExtension(resolved.url);
+    const archive_kind = try detectArchiveKind(resolved.url, archive_path);
     out.print("Extracting {s}...\n", .{resolved.token});
 
-    if (mem.eql(u8, ext, ".dmg")) {
-        try extractDmg(allocator, archive_path, version_dir);
-    } else if (mem.eql(u8, ext, ".zip")) {
-        try extractZip(allocator, archive_path, version_dir);
-    } else if (mem.eql(u8, ext, ".tar.gz") or mem.eql(u8, ext, ".tar.bz2") or mem.eql(u8, ext, ".tar.xz")) {
-        try extractTar(allocator, archive_path, version_dir);
-    } else if (mem.eql(u8, ext, ".pkg")) {
-        err_out.warn("PKG archives cannot be extracted for binary-only install.", .{});
-        err_out.print("Use: brew install --cask {s}\n", .{resolved.token});
-        return error.UnsupportedArchiveType;
-    } else {
-        err_out.err("Unsupported archive format: {s}", .{ext});
-        return error.UnsupportedArchiveType;
+    switch (archive_kind) {
+        .dmg => try extractDmg(allocator, archive_path, version_dir),
+        .zip => try extractZip(allocator, archive_path, version_dir),
+        .tar => try extractTar(allocator, archive_path, version_dir),
+        .pkg => {
+            err_out.warn("PKG archives cannot be extracted for binary-only install.", .{});
+            err_out.print("Use: brew install --cask {s}\n", .{resolved.token});
+            return error.UnsupportedArchiveType;
+        },
+        .unknown => {
+            err_out.err("Unsupported archive format for {s}", .{resolved.token});
+            return error.UnsupportedArchiveType;
+        },
     }
 
-    // 6. Stage binary artifacts.
-    if (resolved.binaries.len > 0) {
-        const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{version_dir});
-        defer allocator.free(bin_dir);
-        try fs.cwd().makePath(bin_dir);
-
-        for (resolved.binaries) |binary| {
-            stageBinary(allocator, version_dir, bin_dir, binary) catch |stage_err| {
-                err_out.warn("Could not stage binary \"{s}\": {s}", .{ binary.target, @errorName(stage_err) });
-            };
-        }
-    }
-
-    // 6b. Stage app bundles into /Applications and leave a back-symlink in
-    //     the Caskroom (matching brew's default behaviour).
+    // 6. Stage app bundles into /Applications and leave a back-symlink in
+    //    the Caskroom (matching brew's default behaviour). Apps go first so
+    //    binaries living inside an .app bundle (e.g. docker-desktop's
+    //    Docker.app/Contents/Resources/bin/docker) resolve against
+    //    /Applications, not the to-be-emptied version_dir.
     for (resolved.apps) |app| {
         stageApp(allocator, version_dir, default_appdir, app) catch |stage_err| switch (stage_err) {
             error.AppAlreadyInstalled => err_out.warn(
@@ -105,6 +95,20 @@ pub fn installCask(
                 .{ app.target, @errorName(stage_err) },
             ),
         };
+    }
+
+    // 6b. Stage binary artifacts.
+    if (resolved.binaries.len > 0) {
+        const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{version_dir});
+        defer allocator.free(bin_dir);
+        try fs.cwd().makePath(bin_dir);
+
+        const source_roots = [_][]const u8{ version_dir, default_appdir };
+        for (resolved.binaries) |binary| {
+            stageBinary(allocator, &source_roots, bin_dir, binary) catch |stage_err| {
+                err_out.warn("Could not stage binary \"{s}\": {s}", .{ binary.target, @errorName(stage_err) });
+            };
+        }
     }
 
     // 7. Link into prefix. For upgrades, first unlink the old version's
@@ -140,6 +144,51 @@ pub fn installCask(
     const done_title = try std.fmt.allocPrint(allocator, "{s} {s} is {s}", .{ resolved.name, resolved.version, done_verb });
     defer allocator.free(done_title);
     out.section(done_title);
+}
+
+const ArchiveKind = enum { dmg, zip, tar, pkg, unknown };
+
+/// Decide how to extract a downloaded cask archive. Prefers the URL extension
+/// (cheap, accurate for ~99% of casks) and falls back to sniffing the file's
+/// magic bytes when the URL has no usable extension — e.g. VS Code's download
+/// URL ends in `/darwin-arm64/stable` but the file is a zip. brew sniffs too.
+fn detectArchiveKind(url: []const u8, archive_path: []const u8) !ArchiveKind {
+    const ext = Download.urlExtension(url);
+    if (mem.eql(u8, ext, ".dmg")) return .dmg;
+    if (mem.eql(u8, ext, ".zip")) return .zip;
+    if (mem.eql(u8, ext, ".tar.gz") or mem.eql(u8, ext, ".tar.bz2") or mem.eql(u8, ext, ".tar.xz")) return .tar;
+    if (mem.eql(u8, ext, ".pkg")) return .pkg;
+    return sniffArchiveKind(archive_path);
+}
+
+/// Read magic bytes from the head (and tail, for DMG) of a file to identify
+/// the archive format. Returns .unknown when no signature matches.
+fn sniffArchiveKind(archive_path: []const u8) !ArchiveKind {
+    const file = try fs.cwd().openFile(archive_path, .{});
+    defer file.close();
+
+    // Read head magic.
+    var head: [8]u8 = undefined;
+    const head_len = try file.readAll(&head);
+
+    if (head_len >= 4 and mem.eql(u8, head[0..4], "PK\x03\x04")) return .zip;
+    if (head_len >= 4 and (mem.eql(u8, head[0..4], "PK\x05\x06") or mem.eql(u8, head[0..4], "PK\x07\x08"))) return .zip;
+    if (head_len >= 2 and mem.eql(u8, head[0..2], "\x1f\x8b")) return .tar; // gzip — assume .tar.gz for casks
+    if (head_len >= 3 and mem.eql(u8, head[0..3], "BZh")) return .tar;
+    if (head_len >= 6 and mem.eql(u8, head[0..6], "\xfd7zXZ\x00")) return .tar;
+    if (head_len >= 4 and mem.eql(u8, head[0..4], "xar!")) return .pkg;
+
+    // DMG: UDIF "koly" trailer lives in the last 512 bytes at offset 0.
+    const stat = try file.stat();
+    if (stat.size >= 512) {
+        try file.seekTo(stat.size - 512);
+        var trailer: [4]u8 = undefined;
+        if ((try file.readAll(&trailer)) == 4 and mem.eql(u8, &trailer, "koly")) {
+            return .dmg;
+        }
+    }
+
+    return .unknown;
 }
 
 /// Extract a DMG archive by mounting it, copying contents, and unmounting.
@@ -289,28 +338,33 @@ fn copyAppCrossVolume(allocator: Allocator, src: []const u8, dst: []const u8) !v
     defer allocator.free(rm.stderr);
 }
 
-/// Stage a single binary artifact: find it in the extracted tree and
+/// Stage a single binary artifact: find it under one of the source roots and
 /// symlink it into the cask's bin/ directory.
-fn stageBinary(allocator: Allocator, version_dir: []const u8, bin_dir: []const u8, binary: BinaryArtifact) !void {
-    // Build the full source path within the extracted tree.
-    const source_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, binary.source });
+///
+/// `source_roots` are tried in order — typically `[version_dir, /Applications]`
+/// — because a binary may live in the extracted tree (most casks) or inside
+/// an .app bundle that was already moved to /Applications (e.g. docker).
+///
+/// `binary.target` may be an absolute path in the cask DSL (e.g.
+/// `/usr/local/bin/docker`). bru's Linker always symlinks
+/// `{prefix}/bin/{basename}` → `{bin_dir}/{basename}`, so the basename is
+/// what actually matters; ignore everything else.
+fn stageBinary(allocator: Allocator, source_roots: []const []const u8, bin_dir: []const u8, binary: BinaryArtifact) !void {
+    // Resolve the source by probing each root in order.
+    const source_path = try resolveBinarySource(allocator, source_roots, binary.source);
     defer allocator.free(source_path);
 
-    // Build the target path in bin/.
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, binary.target });
+    // Normalize target to a basename — brew DSL allows absolute paths but
+    // bru stages to {bin_dir}/{basename} regardless.
+    const target_name = std.fs.path.basename(binary.target);
+    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, target_name });
     defer allocator.free(target_path);
-
-    // Verify the source exists.
-    fs.cwd().access(source_path, .{}) catch {
-        return error.BinaryNotFound;
-    };
 
     // Ensure the source is executable.
     const source_file = try fs.cwd().openFile(source_path, .{});
     defer source_file.close();
     const stat = try source_file.stat();
 
-    // Add execute permissions if not already set.
     const mode = stat.mode;
     const new_mode = mode | 0o111;
     if (new_mode != mode) {
@@ -323,13 +377,77 @@ fn stageBinary(allocator: Allocator, version_dir: []const u8, bin_dir: []const u
         else => return err,
     };
 
-    // Create symlink: bin/{target} -> {version_dir}/{source}
     try fs.symLinkAbsolute(source_path, target_path, .{});
+}
+
+/// Probe each `source_roots` entry for `binary.source`, returning the first
+/// path that exists. Returns error.BinaryNotFound if none match.
+/// Caller owns the returned string.
+fn resolveBinarySource(allocator: Allocator, source_roots: []const []const u8, binary_source: []const u8) ![]u8 {
+    for (source_roots) |root| {
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, binary_source });
+        if (fs.cwd().access(candidate, .{})) |_| {
+            return candidate;
+        } else |_| {
+            allocator.free(candidate);
+        }
+    }
+    return error.BinaryNotFound;
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "detectArchiveKind prefers known URL extensions" {
+    // Mock archive_path won't be read when ext matches a known type.
+    try std.testing.expectEqual(ArchiveKind.zip, try detectArchiveKind("https://example.com/app.zip", "/nonexistent"));
+    try std.testing.expectEqual(ArchiveKind.dmg, try detectArchiveKind("https://example.com/app.dmg", "/nonexistent"));
+    try std.testing.expectEqual(ArchiveKind.tar, try detectArchiveKind("https://example.com/app.tar.gz", "/nonexistent"));
+    try std.testing.expectEqual(ArchiveKind.pkg, try detectArchiveKind("https://example.com/app.pkg", "/nonexistent"));
+}
+
+test "sniffArchiveKind detects zip by magic bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const f = try tmp.dir.createFile("payload", .{});
+    try f.writeAll("PK\x03\x04\x14\x00\x00\x00");
+    f.close();
+
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("payload", &buf);
+
+    try std.testing.expectEqual(ArchiveKind.zip, try sniffArchiveKind(path));
+}
+
+test "sniffArchiveKind detects gzip as tar" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const f = try tmp.dir.createFile("payload", .{});
+    try f.writeAll("\x1f\x8b\x08\x00");
+    f.close();
+
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("payload", &buf);
+
+    try std.testing.expectEqual(ArchiveKind.tar, try sniffArchiveKind(path));
+}
+
+test "sniffArchiveKind returns unknown for unrecognized data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const f = try tmp.dir.createFile("payload", .{});
+    try f.writeAll("hello world this is not an archive");
+    f.close();
+
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("payload", &buf);
+
+    try std.testing.expectEqual(ArchiveKind.unknown, try sniffArchiveKind(path));
+}
 
 test "cask_install compiles" {
     // Verify this module compiles and links correctly.
@@ -361,7 +479,8 @@ test "stageBinary creates symlink and sets executable" {
     const bin_dir = try tmp_version.dir.realpath("bin", &bin_buf);
 
     const binary = BinaryArtifact{ .source = "my-tool.sh", .target = "mytool" };
-    try stageBinary(allocator, version_dir, bin_dir, binary);
+    const roots = [_][]const u8{version_dir};
+    try stageBinary(allocator, &roots, bin_dir, binary);
 
     // Verify the symlink exists and points to the source.
     var link_path_buf: [fs.max_path_bytes]u8 = undefined;
@@ -393,6 +512,49 @@ test "stageBinary returns error for missing binary" {
     const bin_dir = try tmp.dir.realpath("bin", &bin_buf);
 
     const binary = BinaryArtifact{ .source = "nonexistent", .target = "mytool" };
-    const result = stageBinary(allocator, version_dir, bin_dir, binary);
+    const roots = [_][]const u8{version_dir};
+    const result = stageBinary(allocator, &roots, bin_dir, binary);
     try std.testing.expectError(error.BinaryNotFound, result);
+}
+
+test "stageBinary falls back to second source root" {
+    const allocator = std.testing.allocator;
+
+    // Mimic the docker-desktop layout: the .app moved out of version_dir
+    // and now lives at the second root (a stand-in for /Applications).
+    var version_tmp = std.testing.tmpDir(.{});
+    defer version_tmp.cleanup();
+    var apps_tmp = std.testing.tmpDir(.{});
+    defer apps_tmp.cleanup();
+
+    try apps_tmp.dir.makePath("Docker.app/Contents/Resources/bin");
+    const f = try apps_tmp.dir.createFile("Docker.app/Contents/Resources/bin/docker", .{});
+    try f.writeAll("#!/bin/sh\n");
+    f.close();
+
+    try version_tmp.dir.makeDir("bin");
+
+    var version_buf: [fs.max_path_bytes]u8 = undefined;
+    const version_dir = try version_tmp.dir.realpath(".", &version_buf);
+    var apps_buf: [fs.max_path_bytes]u8 = undefined;
+    const apps_dir = try apps_tmp.dir.realpath(".", &apps_buf);
+    var bin_buf: [fs.max_path_bytes]u8 = undefined;
+    const bin_dir = try version_tmp.dir.realpath("bin", &bin_buf);
+
+    const binary = BinaryArtifact{
+        .source = "Docker.app/Contents/Resources/bin/docker",
+        .target = "/usr/local/bin/docker", // absolute — should normalize to basename.
+    };
+    const roots = [_][]const u8{ version_dir, apps_dir };
+    try stageBinary(allocator, &roots, bin_dir, binary);
+
+    // Symlink should land at {bin_dir}/docker (basename of the absolute target).
+    var link_buf: [fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/docker", .{bin_dir});
+    var read_buf: [fs.max_path_bytes]u8 = undefined;
+    const target = try fs.readLinkAbsolute(link_path, &read_buf);
+
+    var expected_buf: [fs.max_path_bytes]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/Docker.app/Contents/Resources/bin/docker", .{apps_dir});
+    try std.testing.expectEqualStrings(expected, target);
 }

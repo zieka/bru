@@ -753,8 +753,8 @@ fn runCaskUpgrade(
         };
         defer cask_mod.freeResolvedCask(allocator, resolved);
 
-        if (resolved.binaries.len == 0) {
-            err_out.warn("Skipping cask \"{s}\": no CLI binaries (GUI-only cask).", .{item.token});
+        if (resolved.binaries.len == 0 and resolved.apps.len == 0) {
+            err_out.warn("Skipping cask \"{s}\": no binaries or app bundle.", .{item.token});
             continue;
         }
 
