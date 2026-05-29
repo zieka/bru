@@ -60,6 +60,13 @@ pub fn installCask(
     defer allocator.free(version_dir);
     try fs.cwd().makePath(version_dir);
 
+    // If we fail before linking, wipe the partial version_dir so it doesn't
+    // masquerade as an installed version — cellar.installedVersions reads the
+    // directory listing, so a stranded dir would falsely appear in `bru list`
+    // and `bru outdated` (Bug 4).
+    var commit = false;
+    errdefer if (!commit) fs.deleteTreeAbsolute(version_dir) catch {};
+
     // 5. Determine archive type and extract.
     const archive_kind = try detectArchiveKind(resolved.url, archive_path);
     out.print("Extracting {s}...\n", .{resolved.token});
@@ -84,16 +91,30 @@ pub fn installCask(
     //    binaries living inside an .app bundle (e.g. docker-desktop's
     //    Docker.app/Contents/Resources/bin/docker) resolve against
     //    /Applications, not the to-be-emptied version_dir.
+    //
+    //    During upgrade, stageApp force-replaces the existing /Applications
+    //    bundle (with a move-aside backup that's restored on failure). For a
+    //    fresh install, AppAlreadyInstalled is fatal — silently continuing
+    //    produced half-installed state where the caskroom and state file
+    //    claimed the new version but the user's /Applications still held the
+    //    old one (Bug 1).
+    const is_upgrade = upgrade_from != null;
     for (resolved.apps) |app| {
-        stageApp(allocator, version_dir, default_appdir, app) catch |stage_err| switch (stage_err) {
-            error.AppAlreadyInstalled => err_out.warn(
-                "{s} already exists in {s} — leaving it in place.",
-                .{ app.target, default_appdir },
-            ),
-            else => err_out.warn(
-                "Could not stage app \"{s}\": {s}",
-                .{ app.target, @errorName(stage_err) },
-            ),
+        stageApp(allocator, version_dir, default_appdir, app, is_upgrade) catch |stage_err| switch (stage_err) {
+            error.AppAlreadyInstalled => {
+                err_out.err(
+                    "{s} is already installed at {s}. Use `bru uninstall --cask {s}` first.",
+                    .{ app.target, default_appdir, resolved.token },
+                );
+                return error.AppAlreadyInstalled;
+            },
+            else => {
+                err_out.err(
+                    "Could not stage app \"{s}\": {s}",
+                    .{ app.target, @errorName(stage_err) },
+                );
+                return stage_err;
+            },
         };
     }
 
@@ -126,6 +147,11 @@ pub fn installCask(
     }
 
     try linker.link(resolved.token, version_dir);
+
+    // New version is staged, linked, and visible. The install is committed —
+    // any later failure (e.g. cleaning up the old version) is non-fatal and
+    // must not roll back the new install.
+    commit = true;
 
     // 8. For upgrades, remove the old caskroom version dir now that the new
     //    one is linked.
@@ -272,14 +298,17 @@ fn extractTar(allocator: Allocator, tar_path: []const u8, dest_dir: []const u8) 
 
 /// Stage a single app-bundle artifact:
 ///   1. Verify the extracted source bundle exists.
-///   2. Move it from `{version_dir}/{app.source}` to `{appdir}/{app.target}`
+///   2. If the destination already exists and `is_upgrade` is false, return
+///      `error.AppAlreadyInstalled` so the caller aborts the install — never
+///      silently proceed (that produced half-installed state, see Bug 1).
+///   3. If `is_upgrade` is true and the destination exists, move it aside to a
+///      sibling backup path before staging, restoring it if the move fails.
+///   4. Move new bundle from `{version_dir}/{app.source}` to `{appdir}/{app.target}`
 ///      using rename (same-volume) or `ditto`+`rm -rf` (cross-volume fallback).
-///   3. Leave a back-symlink at `{version_dir}/{app.target}` pointing to the
-///      installed bundle — this matches brew's default Caskroom layout and
-///      lets future correctness checks find the bundle via either path.
-/// Returns `error.AppAlreadyInstalled` if the destination already exists,
-/// so callers can warn-but-continue (brew does the same).
-fn stageApp(allocator: Allocator, version_dir: []const u8, appdir: []const u8, app: AppArtifact) !void {
+///   5. Leave a back-symlink at `{version_dir}/{app.target}` pointing to the
+///      installed bundle — matches brew's Caskroom layout.
+///   6. On full success, delete the moved-aside backup.
+fn stageApp(allocator: Allocator, version_dir: []const u8, appdir: []const u8, app: AppArtifact, is_upgrade: bool) !void {
     const source_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, app.source });
     defer allocator.free(source_path);
 
@@ -290,21 +319,33 @@ fn stageApp(allocator: Allocator, version_dir: []const u8, appdir: []const u8, a
         return error.AppNotFound;
     };
 
-    // If destination already exists, treat as already-installed (warn, don't
-    // overwrite — brew default).
-    if (fs.cwd().access(target_path, .{})) |_| {
-        return error.AppAlreadyInstalled;
-    } else |_| {}
+    const target_exists = blk: {
+        fs.cwd().access(target_path, .{}) catch break :blk false;
+        break :blk true;
+    };
 
-    // Same-volume rename first; if that fails (e.g. EXDEV across volumes),
-    // fall back to a recursive copy that preserves extended attributes
-    // (quarantine flags etc.) then delete the source.
-    if (fs.renameAbsolute(source_path, target_path)) |_| {
-        // ok
-    } else |rename_err| switch (rename_err) {
-        error.RenameAcrossMountPoints => try copyAppCrossVolume(allocator, source_path, target_path),
-        else => return rename_err,
+    if (target_exists and !is_upgrade) {
+        return error.AppAlreadyInstalled;
     }
+
+    // For upgrade-with-existing-target: move target aside to a sibling backup
+    // path. If staging fails we restore it; if it succeeds we delete it.
+    var backup_path_opt: ?[]u8 = null;
+    defer if (backup_path_opt) |p| allocator.free(p);
+
+    if (target_exists) {
+        const backup_path = try std.fmt.allocPrint(allocator, "{s}.bru-replacing.{d}", .{ target_path, std.time.nanoTimestamp() });
+        backup_path_opt = backup_path;
+        try fs.renameAbsolute(target_path, backup_path);
+    }
+
+    // Try to move the new bundle into place. On failure, restore the backup.
+    moveAppIntoPlace(allocator, source_path, target_path) catch |err| {
+        if (backup_path_opt) |p| {
+            fs.renameAbsolute(p, target_path) catch {};
+        }
+        return err;
+    };
 
     // Back-symlink {version_dir}/{target} -> {appdir}/{target}.
     const back_link = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ version_dir, app.target });
@@ -314,6 +355,23 @@ fn stageApp(allocator: Allocator, version_dir: []const u8, appdir: []const u8, a
         else => return err,
     };
     try fs.symLinkAbsolute(target_path, back_link, .{});
+
+    // Success — drop the backup. Best-effort; a leftover .bru-replacing dir is
+    // harmless and is overwritten on the next upgrade attempt.
+    if (backup_path_opt) |p| {
+        fs.deleteTreeAbsolute(p) catch {};
+    }
+}
+
+/// Same-volume rename, falling back to `ditto`+`rm -rf` across volumes so
+/// extended attributes (quarantine flags, ACLs) survive.
+fn moveAppIntoPlace(allocator: Allocator, source_path: []const u8, target_path: []const u8) !void {
+    if (fs.renameAbsolute(source_path, target_path)) |_| {
+        return;
+    } else |rename_err| switch (rename_err) {
+        error.RenameAcrossMountPoints => try copyAppCrossVolume(allocator, source_path, target_path),
+        else => return rename_err,
+    }
 }
 
 /// Recursively copy an .app bundle across volumes using `ditto`, then remove
@@ -515,6 +573,118 @@ test "stageBinary returns error for missing binary" {
     const roots = [_][]const u8{version_dir};
     const result = stageBinary(allocator, &roots, bin_dir, binary);
     try std.testing.expectError(error.BinaryNotFound, result);
+}
+
+// ---------------------------------------------------------------------------
+// Bug 1: silent-skip on AppAlreadyInstalled
+// Upgrade must replace the existing .app; fresh install must abort cleanly.
+// ---------------------------------------------------------------------------
+
+test "stageApp returns AppAlreadyInstalled when fresh install and target exists" {
+    const allocator = std.testing.allocator;
+
+    var version_tmp = std.testing.tmpDir(.{});
+    defer version_tmp.cleanup();
+    var apps_tmp = std.testing.tmpDir(.{});
+    defer apps_tmp.cleanup();
+
+    // New version on disk in version_dir.
+    try version_tmp.dir.makePath("Foo.app");
+    const new_marker = try version_tmp.dir.createFile("Foo.app/marker", .{});
+    try new_marker.writeAll("new");
+    new_marker.close();
+
+    // Old version already at appdir — must not be replaced for fresh install.
+    try apps_tmp.dir.makePath("Foo.app");
+    const old_marker = try apps_tmp.dir.createFile("Foo.app/marker", .{});
+    try old_marker.writeAll("old");
+    old_marker.close();
+
+    var v_buf: [fs.max_path_bytes]u8 = undefined;
+    const version_dir = try version_tmp.dir.realpath(".", &v_buf);
+    var a_buf: [fs.max_path_bytes]u8 = undefined;
+    const apps_dir = try apps_tmp.dir.realpath(".", &a_buf);
+
+    const app = AppArtifact{ .source = "Foo.app", .target = "Foo.app" };
+    const result = stageApp(allocator, version_dir, apps_dir, app, false);
+    try std.testing.expectError(error.AppAlreadyInstalled, result);
+
+    // Old content must survive.
+    const f = try apps_tmp.dir.openFile("Foo.app/marker", .{});
+    defer f.close();
+    var read: [3]u8 = undefined;
+    _ = try f.readAll(&read);
+    try std.testing.expectEqualStrings("old", &read);
+}
+
+test "stageApp replaces existing target when upgrading" {
+    const allocator = std.testing.allocator;
+
+    var version_tmp = std.testing.tmpDir(.{});
+    defer version_tmp.cleanup();
+    var apps_tmp = std.testing.tmpDir(.{});
+    defer apps_tmp.cleanup();
+
+    try version_tmp.dir.makePath("Foo.app");
+    const new_marker = try version_tmp.dir.createFile("Foo.app/marker", .{});
+    try new_marker.writeAll("new");
+    new_marker.close();
+
+    try apps_tmp.dir.makePath("Foo.app");
+    const old_marker = try apps_tmp.dir.createFile("Foo.app/marker", .{});
+    try old_marker.writeAll("old");
+    old_marker.close();
+
+    var v_buf: [fs.max_path_bytes]u8 = undefined;
+    const version_dir = try version_tmp.dir.realpath(".", &v_buf);
+    var a_buf: [fs.max_path_bytes]u8 = undefined;
+    const apps_dir = try apps_tmp.dir.realpath(".", &a_buf);
+
+    const app = AppArtifact{ .source = "Foo.app", .target = "Foo.app" };
+    try stageApp(allocator, version_dir, apps_dir, app, true);
+
+    // /Applications/Foo.app/marker should now contain "new".
+    const f = try apps_tmp.dir.openFile("Foo.app/marker", .{});
+    defer f.close();
+    var read: [3]u8 = undefined;
+    _ = try f.readAll(&read);
+    try std.testing.expectEqualStrings("new", &read);
+
+    // No leftover .bru-replacing-* directories.
+    var apps_iter = try apps_tmp.dir.openDir(".", .{ .iterate = true });
+    defer apps_iter.close();
+    var walker = apps_iter.iterate();
+    while (try walker.next()) |entry| {
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".bru-replacing") == null);
+    }
+}
+
+test "stageApp upgrade with no existing target installs cleanly" {
+    const allocator = std.testing.allocator;
+
+    var version_tmp = std.testing.tmpDir(.{});
+    defer version_tmp.cleanup();
+    var apps_tmp = std.testing.tmpDir(.{});
+    defer apps_tmp.cleanup();
+
+    try version_tmp.dir.makePath("Bar.app");
+    const f = try version_tmp.dir.createFile("Bar.app/marker", .{});
+    try f.writeAll("v2");
+    f.close();
+
+    var v_buf: [fs.max_path_bytes]u8 = undefined;
+    const version_dir = try version_tmp.dir.realpath(".", &v_buf);
+    var a_buf: [fs.max_path_bytes]u8 = undefined;
+    const apps_dir = try apps_tmp.dir.realpath(".", &a_buf);
+
+    const app = AppArtifact{ .source = "Bar.app", .target = "Bar.app" };
+    try stageApp(allocator, version_dir, apps_dir, app, true);
+
+    const f2 = try apps_tmp.dir.openFile("Bar.app/marker", .{});
+    defer f2.close();
+    var read: [2]u8 = undefined;
+    _ = try f2.readAll(&read);
+    try std.testing.expectEqualStrings("v2", &read);
 }
 
 test "stageBinary falls back to second source root" {

@@ -140,8 +140,25 @@ fn attemptFetch(
     try file_writer.interface.flush();
 
     if (result.status.class() != .success) {
+        // Emit context to stderr before returning the bare error so users can
+        // see WHY the download failed (status code + URL). Bare HttpError
+        // alone is unactionable (Bug 3).
+        var msg_buf: [1024]u8 = undefined;
+        const msg = formatHttpFailure(&msg_buf, @intFromEnum(result.status), url);
+        std.debug.print("{s}\n", .{msg});
         return error.HttpError;
     }
+}
+
+/// Format an HTTP failure into `buf` as "HTTP {code} from {url}". If the
+/// buffer is too small, the message is truncated but always starts with
+/// "HTTP {code}" so the most important info survives.
+fn formatHttpFailure(buf: []u8, status_code: u16, url: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "HTTP {d} from {s}", .{ status_code, url }) catch blk: {
+        // bufPrint failed because the URL doesn't fit. Truncate by writing
+        // just the status code, which always fits in a sensible buffer.
+        break :blk std.fmt.bufPrint(buf, "HTTP {d}", .{status_code}) catch buf[0..0];
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +171,22 @@ test "isTransient classifies retriable errors" {
     try std.testing.expect(isTransient(error.ConnectionResetByPeer));
     try std.testing.expect(!isTransient(error.HttpError));
     try std.testing.expect(!isTransient(error.OutOfMemory));
+}
+
+test "formatHttpFailure includes status code and URL" {
+    var buf: [256]u8 = undefined;
+    const msg = formatHttpFailure(&buf, 404, "https://example.com/foo.dmg");
+    try std.testing.expectEqualStrings(
+        "HTTP 404 from https://example.com/foo.dmg",
+        msg,
+    );
+}
+
+test "formatHttpFailure truncates long URLs gracefully" {
+    var buf: [40]u8 = undefined;
+    const msg = formatHttpFailure(&buf, 500, "https://example.com/path");
+    // Buffer can't hold the whole message; we still want a sane prefix.
+    try std.testing.expect(std.mem.startsWith(u8, msg, "HTTP 500"));
 }
 
 test "HttpClient fetch downloads a file" {

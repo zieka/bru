@@ -759,7 +759,7 @@ fn runCaskUpgrade(
         }
 
         cask_install.installCask(allocator, config, &http_client, resolved, item.installed_version) catch |install_err| {
-            err_out.err("Failed to upgrade cask \"{s}\": {s}", .{ item.token, @errorName(install_err) });
+            err_out.err("Failed to upgrade cask \"{s}\" ({s}): {s}", .{ item.token, resolved.url, @errorName(install_err) });
             continue;
         };
 

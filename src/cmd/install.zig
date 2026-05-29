@@ -408,7 +408,10 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
     }
 
     // Run the cask install pipeline.
-    try cask_install.installCask(allocator, config, &http_client, resolved, null);
+    cask_install.installCask(allocator, config, &http_client, resolved, null) catch |install_err| {
+        err_out.err("Failed to install cask \"{s}\" ({s}): {s}", .{ name, resolved.url, @errorName(install_err) });
+        return install_err;
+    };
 }
 
 // ---------------------------------------------------------------------------
