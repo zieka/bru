@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const HttpClient = @import("http.zig").HttpClient;
@@ -19,7 +20,16 @@ pub const CaskInfo = struct {
 
 /// Parse a JSON array of cask objects into a slice of CaskInfo.
 /// The caller owns the returned slice and must free each entry with freeCask.
+/// Uses the current machine's macOS for variation resolution.
 pub fn parseCaskJson(allocator: Allocator, json_bytes: []const u8) ![]CaskInfo {
+    var tag_buf: [64]u8 = undefined;
+    const tag = currentMacOSVariationTag(&tag_buf);
+    return parseCaskJsonWithTag(allocator, json_bytes, tag);
+}
+
+/// Same as parseCaskJson but with the variation tag passed explicitly.
+/// Useful for tests and for callers that want to resolve for a non-current OS.
+pub fn parseCaskJsonWithTag(allocator: Allocator, json_bytes: []const u8, variation_tag: []const u8) ![]CaskInfo {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{
         .allocate = .alloc_always,
     });
@@ -44,15 +54,30 @@ pub fn parseCaskJson(allocator: Allocator, json_bytes: []const u8) ![]CaskInfo {
             else => continue,
         };
 
-        const info = parseOneCask(allocator, obj) catch continue;
+        const info = parseOneCask(allocator, obj, variation_tag) catch continue;
         result.appendAssumeCapacity(info);
     }
 
     return try result.toOwnedSlice(allocator);
 }
 
-/// Parse a single cask JSON object into a CaskInfo.
-fn parseOneCask(allocator: Allocator, obj: std.json.ObjectMap) !CaskInfo {
+/// Parse a single cask JSON object's bytes into a CaskInfo, applying the given
+/// variation tag. Public so tests can drive parseOneCask directly.
+pub fn parseSingleCaskJson(allocator: Allocator, json_bytes: []const u8, variation_tag: []const u8) !CaskInfo {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{
+        .allocate = .alloc_always,
+    });
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidJson,
+    };
+    return parseOneCask(allocator, obj, variation_tag);
+}
+
+/// Parse a single cask JSON object into a CaskInfo. Applies the platform
+/// variation override iff `variation_tag` is present in `variations`.
+fn parseOneCask(allocator: Allocator, obj: std.json.ObjectMap, variation_tag: []const u8) !CaskInfo {
     const token = try allocator.dupe(u8, jsonStr(obj, "token") orelse return error.MissingField);
     errdefer allocator.free(token);
 
@@ -81,13 +106,23 @@ fn parseOneCask(allocator: Allocator, obj: std.json.ObjectMap) !CaskInfo {
     const homepage = try allocator.dupe(u8, jsonStr(obj, "homepage") orelse "");
     errdefer allocator.free(homepage);
 
-    const version = try allocator.dupe(u8, jsonStr(obj, "version") orelse "");
+    // Start from top-level, then override with the current-OS variation iff present.
+    var version_src: []const u8 = jsonStr(obj, "version") orelse "";
+    var url_src: []const u8 = jsonStr(obj, "url") orelse "";
+    var sha256_src: []const u8 = jsonStr(obj, "sha256") orelse "";
+    if (variationOverrideObject(obj, variation_tag)) |tag_obj| {
+        if (jsonStr(tag_obj, "version")) |v| version_src = v;
+        if (jsonStr(tag_obj, "url")) |u| url_src = u;
+        if (jsonStr(tag_obj, "sha256")) |s| sha256_src = s;
+    }
+
+    const version = try allocator.dupe(u8, version_src);
     errdefer allocator.free(version);
 
-    const url = try allocator.dupe(u8, jsonStr(obj, "url") orelse "");
+    const url = try allocator.dupe(u8, url_src);
     errdefer allocator.free(url);
 
-    const sha256 = try allocator.dupe(u8, jsonStr(obj, "sha256") orelse "");
+    const sha256 = try allocator.dupe(u8, sha256_src);
     // No errdefer needed for the last allocation before the return.
 
     const deprecated = jsonBool(obj, "deprecated") orelse false;
@@ -168,30 +203,53 @@ pub const ResolvedCask = struct {
     apps: []AppArtifact,
 };
 
-/// Platform tags to try when resolving cask variations, in priority order.
-/// Tries the most specific first (arch + OS version), then falls back to
-/// less specific tags. The first match wins.
-fn platformVariationTags() []const []const u8 {
-    const arch = @import("builtin").target.cpu.arch;
-
-    if (arch == .aarch64) {
-        return &.{
-            "arm64_tahoe",
-            "arm64_sequoia",
-            "arm64_sonoma",
-            "arm64_ventura",
-            "arm64_monterey",
-            "arm64_big_sur",
-        };
-    }
-    return &.{
-        "tahoe",
-        "sequoia",
-        "sonoma",
-        "ventura",
-        "monterey",
-        "big_sur",
+/// Map a Darwin kernel major version and CPU arch to the Homebrew cask
+/// variation tag for the user's actual macOS. Returns "" when the kernel
+/// release is unknown — callers treat empty as "no variation, use top-level".
+///
+/// Darwin → macOS mapping:
+///   25 → Tahoe (macOS 26)        22 → Ventura (13)
+///   24 → Sequoia (15)            21 → Monterey (12)
+///   23 → Sonoma (14)             20 → Big Sur (11)
+fn darwinReleaseToVariationTag(major: u32, arch: std.Target.Cpu.Arch, buf: []u8) []const u8 {
+    const name: []const u8 = switch (major) {
+        25 => "tahoe",
+        24 => "sequoia",
+        23 => "sonoma",
+        22 => "ventura",
+        21 => "monterey",
+        20 => "big_sur",
+        else => return "",
     };
+    const prefix: []const u8 = if (arch == .aarch64) "arm64_" else "";
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ prefix, name }) catch "";
+}
+
+/// Return the cask-variation tag for THIS machine (e.g. "arm64_tahoe"),
+/// or "" if it cannot be determined. Uses uname() — no subprocess.
+///
+/// Match policy: a variation must match this exact tag to override the
+/// top-level fields. Previously the resolver walked all known tags new-to-old
+/// and applied the first match, which downgraded current-macOS users when a
+/// cask had variations only for older OSes (e.g. raycast: top-level 1.104.18,
+/// arm64_monterey override 1.94.4 — a Tahoe user was incorrectly handed 1.94.4).
+pub fn currentMacOSVariationTag(buf: []u8) []const u8 {
+    const uname = std.posix.uname();
+    const release = std.mem.sliceTo(&uname.release, 0);
+    var it = std.mem.splitScalar(u8, release, '.');
+    const major_str = it.next() orelse return "";
+    const major = std.fmt.parseInt(u32, major_str, 10) catch return "";
+    return darwinReleaseToVariationTag(major, builtin.target.cpu.arch, buf);
+}
+
+/// If `obj.variations[variation_tag]` exists and is an object, return it.
+/// Otherwise null — caller falls back to top-level fields.
+fn variationOverrideObject(obj: std.json.ObjectMap, variation_tag: []const u8) ?std.json.ObjectMap {
+    if (variation_tag.len == 0) return null;
+    const var_val = obj.get("variations") orelse return null;
+    const variations = asObject(var_val) orelse return null;
+    const tag_val = variations.get(variation_tag) orelse return null;
+    return asObject(tag_val);
 }
 
 /// Fetch and resolve a cask from the per-cask API.
@@ -209,8 +267,18 @@ pub fn fetchAndResolveCask(allocator: Allocator, http_client: *HttpClient, token
     return try parseResolvedCask(allocator, json_bytes);
 }
 
-/// Parse a per-cask API JSON response into a ResolvedCask.
+/// Parse a per-cask API JSON response, applying the current machine's macOS
+/// variation. See parseResolvedCaskWithTag for tag semantics.
 pub fn parseResolvedCask(allocator: Allocator, json_bytes: []const u8) !ResolvedCask {
+    var tag_buf: [64]u8 = undefined;
+    const tag = currentMacOSVariationTag(&tag_buf);
+    return parseResolvedCaskWithTag(allocator, json_bytes, tag);
+}
+
+/// Parse a per-cask API JSON response into a ResolvedCask, applying the
+/// variation block for `variation_tag` iff it exists. Pass "" to skip
+/// variations entirely.
+pub fn parseResolvedCaskWithTag(allocator: Allocator, json_bytes: []const u8, variation_tag: []const u8) !ResolvedCask {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{
         .allocate = .alloc_always,
     });
@@ -224,45 +292,24 @@ pub fn parseResolvedCask(allocator: Allocator, json_bytes: []const u8) !Resolved
     const result_token = try allocator.dupe(u8, jsonStr(obj, "token") orelse return error.MissingField);
     errdefer allocator.free(result_token);
 
-    // Start with top-level url/sha256/version, then override from variations.
-    var url = try allocator.dupe(u8, jsonStr(obj, "url") orelse "");
+    // Resolve url/sha256/version against the variation for this macOS, if any.
+    var url_src: []const u8 = jsonStr(obj, "url") orelse "";
+    var sha256_src: []const u8 = jsonStr(obj, "sha256") orelse "";
+    var version_src: []const u8 = jsonStr(obj, "version") orelse "";
+    if (variationOverrideObject(obj, variation_tag)) |tag_obj| {
+        if (jsonStr(tag_obj, "url")) |v| url_src = v;
+        if (jsonStr(tag_obj, "sha256")) |v| sha256_src = v;
+        if (jsonStr(tag_obj, "version")) |v| version_src = v;
+    }
+
+    const url = try allocator.dupe(u8, url_src);
     errdefer allocator.free(url);
 
-    var sha256 = try allocator.dupe(u8, jsonStr(obj, "sha256") orelse "");
+    const sha256 = try allocator.dupe(u8, sha256_src);
     errdefer allocator.free(sha256);
 
-    var version = try allocator.dupe(u8, jsonStr(obj, "version") orelse "");
+    const version = try allocator.dupe(u8, version_src);
     errdefer allocator.free(version);
-
-    // Check variations for platform-specific overrides.
-    // Allocate new values before freeing old ones to avoid double-free on OOM.
-    if (obj.get("variations")) |var_val| {
-        if (asObject(var_val)) |variations| {
-            const tags = platformVariationTags();
-            for (tags) |tag| {
-                if (variations.get(tag)) |tag_val| {
-                    if (asObject(tag_val)) |tag_obj| {
-                        if (jsonStr(tag_obj, "url")) |v_url| {
-                            const new_url = try allocator.dupe(u8, v_url);
-                            allocator.free(url);
-                            url = new_url;
-                        }
-                        if (jsonStr(tag_obj, "sha256")) |v_sha| {
-                            const new_sha = try allocator.dupe(u8, v_sha);
-                            allocator.free(sha256);
-                            sha256 = new_sha;
-                        }
-                        if (jsonStr(tag_obj, "version")) |v_ver| {
-                            const new_ver = try allocator.dupe(u8, v_ver);
-                            allocator.free(version);
-                            version = new_ver;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
 
     // Parse name (first element of name array).
     const result_name = blk: {
@@ -684,4 +731,151 @@ test "cleanArtifactPath strips HOMEBREW_PREFIX/Caskroom prefix" {
 
 test "cleanArtifactPath preserves plain paths" {
     try std.testing.expectEqualStrings("studio", cleanArtifactPath("studio"));
+}
+
+// ---------------------------------------------------------------------------
+// Bug 2: variation-tag selection must match the user's actual macOS.
+// Previously the code iterated platformVariationTags() new-to-old and applied
+// the first match, which downgraded users on a recent macOS when a cask had
+// variations only for older OSes (e.g. raycast 1.99.3 -> 1.94.4).
+// ---------------------------------------------------------------------------
+
+test "parseSingleCaskJson without variations keeps top-level fields" {
+    const allocator = std.testing.allocator;
+    const json_bytes =
+        \\{
+        \\  "token": "raycast",
+        \\  "name": ["Raycast"],
+        \\  "url": "https://example.com/raycast-1.104.18.dmg",
+        \\  "version": "1.104.18",
+        \\  "sha256": "newhash"
+        \\}
+    ;
+    const info = try parseSingleCaskJson(allocator, json_bytes, "arm64_tahoe");
+    defer freeCask(allocator, info);
+    try std.testing.expectEqualStrings("1.104.18", info.version);
+    try std.testing.expectEqualStrings("https://example.com/raycast-1.104.18.dmg", info.url);
+    try std.testing.expectEqualStrings("newhash", info.sha256);
+}
+
+test "parseSingleCaskJson applies variation only when tag matches user OS" {
+    const allocator = std.testing.allocator;
+    // Top-level is the current Raycast; variations cap older macOS at 1.94.4.
+    // A Tahoe user must NOT pick up monterey's downgrade.
+    const json_bytes =
+        \\{
+        \\  "token": "raycast",
+        \\  "name": ["Raycast"],
+        \\  "url": "https://example.com/raycast-1.104.18.dmg",
+        \\  "version": "1.104.18",
+        \\  "sha256": "newhash",
+        \\  "variations": {
+        \\    "arm64_monterey": {
+        \\      "url": "https://example.com/raycast-1.94.4.dmg",
+        \\      "version": "1.94.4",
+        \\      "sha256": "oldhash"
+        \\    }
+        \\  }
+        \\}
+    ;
+    const tahoe = try parseSingleCaskJson(allocator, json_bytes, "arm64_tahoe");
+    defer freeCask(allocator, tahoe);
+    try std.testing.expectEqualStrings("1.104.18", tahoe.version);
+    try std.testing.expectEqualStrings("newhash", tahoe.sha256);
+}
+
+test "parseSingleCaskJson uses variation when tag matches" {
+    const allocator = std.testing.allocator;
+    const json_bytes =
+        \\{
+        \\  "token": "raycast",
+        \\  "name": ["Raycast"],
+        \\  "url": "https://example.com/raycast-1.104.18.dmg",
+        \\  "version": "1.104.18",
+        \\  "sha256": "newhash",
+        \\  "variations": {
+        \\    "arm64_monterey": {
+        \\      "url": "https://example.com/raycast-1.94.4.dmg",
+        \\      "version": "1.94.4",
+        \\      "sha256": "oldhash"
+        \\    }
+        \\  }
+        \\}
+    ;
+    const monterey = try parseSingleCaskJson(allocator, json_bytes, "arm64_monterey");
+    defer freeCask(allocator, monterey);
+    try std.testing.expectEqualStrings("1.94.4", monterey.version);
+    try std.testing.expectEqualStrings("oldhash", monterey.sha256);
+}
+
+test "parseResolvedCaskWithTag ignores non-matching variation" {
+    const allocator = std.testing.allocator;
+    const json_bytes =
+        \\{
+        \\  "token": "raycast",
+        \\  "name": ["Raycast"],
+        \\  "url": "https://example.com/raycast-1.104.18.dmg",
+        \\  "version": "1.104.18",
+        \\  "sha256": "newhash",
+        \\  "variations": {
+        \\    "arm64_monterey": {
+        \\      "url": "https://example.com/raycast-1.94.4.dmg",
+        \\      "version": "1.94.4",
+        \\      "sha256": "oldhash"
+        \\    }
+        \\  },
+        \\  "artifacts": [{"app": ["Raycast.app"]}]
+        \\}
+    ;
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "arm64_tahoe");
+    defer freeResolvedCask(allocator, resolved);
+    try std.testing.expectEqualStrings("1.104.18", resolved.version);
+}
+
+test "parseResolvedCaskWithTag picks matching variation" {
+    const allocator = std.testing.allocator;
+    const json_bytes =
+        \\{
+        \\  "token": "raycast",
+        \\  "name": ["Raycast"],
+        \\  "url": "https://example.com/raycast-1.104.18.dmg",
+        \\  "version": "1.104.18",
+        \\  "sha256": "newhash",
+        \\  "variations": {
+        \\    "arm64_monterey": {
+        \\      "url": "https://example.com/raycast-1.94.4.dmg",
+        \\      "version": "1.94.4",
+        \\      "sha256": "oldhash"
+        \\    }
+        \\  },
+        \\  "artifacts": [{"app": ["Raycast.app"]}]
+        \\}
+    ;
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "arm64_monterey");
+    defer freeResolvedCask(allocator, resolved);
+    try std.testing.expectEqualStrings("1.94.4", resolved.version);
+}
+
+test "currentMacOSVariationTag identifies Tahoe from Darwin 25" {
+    var buf: [64]u8 = undefined;
+    const tag = darwinReleaseToVariationTag(25, .aarch64, &buf);
+    try std.testing.expectEqualStrings("arm64_tahoe", tag);
+}
+
+test "currentMacOSVariationTag identifies Sequoia from Darwin 24" {
+    var buf: [64]u8 = undefined;
+    const tag = darwinReleaseToVariationTag(24, .aarch64, &buf);
+    try std.testing.expectEqualStrings("arm64_sequoia", tag);
+}
+
+test "currentMacOSVariationTag handles intel arch" {
+    var buf: [64]u8 = undefined;
+    const tag = darwinReleaseToVariationTag(23, .x86_64, &buf);
+    try std.testing.expectEqualStrings("sonoma", tag);
+}
+
+test "currentMacOSVariationTag returns empty for unknown release" {
+    var buf: [64]u8 = undefined;
+    const tag = darwinReleaseToVariationTag(99, .aarch64, &buf);
+    try std.testing.expectEqualStrings("", tag);
 }
