@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_helpers = @import("json_helpers.zig");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
@@ -160,14 +161,14 @@ fn parseOneFormula(allocator: Allocator, obj: std.json.ObjectMap, platform_tags:
     const caveats = try allocator.dupe(u8, jsonStr(obj, "caveats") orelse "");
     errdefer allocator.free(caveats);
 
-    const dependencies = try parseStringArray(allocator, obj, "dependencies");
-    errdefer freeStringSlice(allocator, dependencies);
+    const dependencies = try json_helpers.parseStringArray(allocator, obj, "dependencies");
+    errdefer json_helpers.freeStringSlice(allocator, dependencies);
 
-    const build_dependencies = try parseStringArray(allocator, obj, "build_dependencies");
-    errdefer freeStringSlice(allocator, build_dependencies);
+    const build_dependencies = try json_helpers.parseStringArray(allocator, obj, "build_dependencies");
+    errdefer json_helpers.freeStringSlice(allocator, build_dependencies);
 
-    const oldnames = try parseStringArray(allocator, obj, "oldnames");
-    errdefer freeStringSlice(allocator, oldnames);
+    const oldnames = try json_helpers.parseStringArray(allocator, obj, "oldnames");
+    errdefer json_helpers.freeStringSlice(allocator, oldnames);
 
     const deprecation_replacement = try allocator.dupe(u8, jsonStr(obj, "deprecation_replacement_formula") orelse "");
     errdefer allocator.free(deprecation_replacement);
@@ -252,9 +253,9 @@ pub fn freeFormula(allocator: Allocator, f: FormulaInfo) void {
     allocator.free(f.version);
     allocator.free(f.tap);
     allocator.free(f.caveats);
-    freeStringSlice(allocator, f.dependencies);
-    freeStringSlice(allocator, f.build_dependencies);
-    freeStringSlice(allocator, f.oldnames);
+    json_helpers.freeStringSlice(allocator, f.dependencies);
+    json_helpers.freeStringSlice(allocator, f.build_dependencies);
+    json_helpers.freeStringSlice(allocator, f.oldnames);
     allocator.free(f.deprecation_replacement);
     allocator.free(f.bottle_root_url);
     allocator.free(f.bottle_sha256);
@@ -296,36 +297,6 @@ fn asObject(val: std.json.Value) ?std.json.ObjectMap {
     };
 }
 
-/// Parse a JSON array of strings into an owned slice.
-fn parseStringArray(allocator: Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
-    const arr_val = obj.get(key) orelse return try allocator.alloc([]const u8, 0);
-    const arr = switch (arr_val) {
-        .array => |a| a,
-        else => return try allocator.alloc([]const u8, 0),
-    };
-
-    var result = try std.ArrayList([]const u8).initCapacity(allocator, arr.items.len);
-    errdefer {
-        for (result.items) |s| allocator.free(s);
-        result.deinit(allocator);
-    }
-
-    for (arr.items) |item| {
-        const s = switch (item) {
-            .string => |s| s,
-            else => continue,
-        };
-        result.appendAssumeCapacity(try allocator.dupe(u8, s));
-    }
-
-    return try result.toOwnedSlice(allocator);
-}
-
-/// Free a slice of owned strings.
-fn freeStringSlice(allocator: Allocator, slice: []const []const u8) void {
-    for (slice) |s| allocator.free(s);
-    allocator.free(slice);
-}
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -5,6 +5,7 @@ const Config = @import("../config.zig").Config;
 const Cellar = @import("../cellar.zig").Cellar;
 const Linker = @import("../linker.zig").Linker;
 const Output = @import("../output.zig").Output;
+const cask_install = @import("../cask_install.zig");
 
 /// Uninstall one or more formulae by unlinking from the prefix and removing kegs.
 ///
@@ -58,11 +59,15 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
         // Get installed versions — check cellar first, then caskroom.
         const cellar = Cellar.init(config.cellar);
         var base_path = config.cellar;
+        var is_cask = false;
         var versions = cellar.installedVersions(allocator, name);
         if (versions == null) {
             const caskroom = Cellar.init(config.caskroom);
             versions = caskroom.installedVersions(allocator, name);
-            if (versions != null) base_path = config.caskroom;
+            if (versions != null) {
+                base_path = config.caskroom;
+                is_cask = true;
+            }
         }
         const installed_versions = versions orelse {
             err_out.err("{s} is not installed.", .{name});
@@ -87,6 +92,14 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
             linker.unlink(keg_path) catch |link_err| {
                 out.warn("Failed to unlink {s} {s}: {s}", .{ name, version, @errorName(link_err) });
             };
+
+            // A cask can install outside the Caskroom — a `pkg` payload under
+            // /usr/local, support files named by `delete:`/`trash:`. Deleting
+            // the keg alone would leave those behind, so undo them while the
+            // keg, which holds the recorded uninstall plan, still exists.
+            if (is_cask) {
+                cask_install.uninstallCaskArtifacts(allocator, keg_path, out, err_out);
+            }
 
             // Delete the keg directory tree.
             fs.deleteTreeAbsolute(keg_path) catch |del_err| {

@@ -192,6 +192,30 @@ pub const AppArtifact = struct {
     target: []const u8, // destination basename in /Applications, e.g., "Rectangle.app"
 };
 
+/// A macOS installer package. Nothing to extract — it is handed to
+/// `/usr/sbin/installer -target /`, which writes to absolute paths it declares.
+pub const PkgArtifact = struct {
+    source: []const u8, // path to the .pkg relative to the staged version dir
+    allow_untrusted: bool, // `pkg "x.pkg", allow_untrusted: true`
+};
+
+/// A cask's `uninstall` stanza, split into directives bru can carry out and
+/// those it cannot. A pkg cask writes outside the Caskroom, so this is the
+/// only record of what to remove; `unsupported` drives the install-time gate.
+pub const UninstallPlan = struct {
+    pkgutil: [][]const u8, // receipts to forget, and whose payload to delete
+    delete: [][]const u8, // paths to remove outright
+    rmdir: [][]const u8, // dirs to remove only if they end up empty
+    trash: [][]const u8, // paths to move to the user's Trash
+    /// Directives bru does not implement (launchctl, quit, script, ...), deduped.
+    unsupported: [][]const u8,
+
+    pub fn isEmpty(self: UninstallPlan) bool {
+        return self.pkgutil.len == 0 and self.delete.len == 0 and
+            self.rmdir.len == 0 and self.trash.len == 0;
+    }
+};
+
 /// Resolved metadata for installing a single cask, fetched from per-cask API.
 pub const ResolvedCask = struct {
     token: []const u8,
@@ -201,6 +225,8 @@ pub const ResolvedCask = struct {
     name: []const u8,
     binaries: []BinaryArtifact,
     apps: []AppArtifact,
+    pkgs: []PkgArtifact,
+    uninstall: UninstallPlan,
 };
 
 /// Map a Darwin kernel major version and CPU arch to the Homebrew cask
@@ -339,6 +365,24 @@ pub fn parseResolvedCaskWithTag(allocator: Allocator, json_bytes: []const u8, va
 
     // Parse app-bundle artifacts (e.g. `app "Rectangle.app"`).
     const apps = try parseAppArtifacts(allocator, obj);
+    errdefer {
+        for (apps) |a| {
+            allocator.free(a.source);
+            allocator.free(a.target);
+        }
+        allocator.free(apps);
+    }
+
+    // Parse pkg artifacts (e.g. `pkg "session-manager-plugin.pkg"`).
+    const pkgs = try parsePkgArtifacts(allocator, obj);
+    errdefer {
+        for (pkgs) |p| allocator.free(p.source);
+        allocator.free(pkgs);
+    }
+
+    // Parse the `uninstall` stanza so an install can be undone later, and so
+    // the caller can tell whether bru is able to undo it at all.
+    const uninstall = try parseUninstallPlan(allocator, obj);
 
     return ResolvedCask{
         .token = result_token,
@@ -348,6 +392,8 @@ pub fn parseResolvedCaskWithTag(allocator: Allocator, json_bytes: []const u8, va
         .name = result_name,
         .binaries = binaries,
         .apps = apps,
+        .pkgs = pkgs,
+        .uninstall = uninstall,
     };
 }
 
@@ -477,6 +523,180 @@ fn parseAppArtifacts(allocator: Allocator, obj: std.json.ObjectMap) ![]AppArtifa
     return try result.toOwnedSlice(allocator);
 }
 
+/// A cask's `artifacts` entries, empty when the key is absent or malformed.
+fn artifactsArray(obj: std.json.ObjectMap) []const std.json.Value {
+    const val = obj.get("artifacts") orelse return &.{};
+    return switch (val) {
+        .array => |a| a.items,
+        else => &.{},
+    };
+}
+
+/// Parse pkg artifacts: {"pkg": ["Foo.pkg"]} or ["Foo.pkg", {"allow_untrusted": true}].
+// TODO: `choices` (installer choice overrides) is ignored; those casks install
+// with the package's defaults.
+fn parsePkgArtifacts(allocator: Allocator, obj: std.json.ObjectMap) ![]PkgArtifact {
+    var result = std.ArrayList(PkgArtifact){};
+    errdefer {
+        for (result.items) |p| allocator.free(p.source);
+        result.deinit(allocator);
+    }
+
+    for (artifactsArray(obj)) |artifact_val| {
+        const artifact_obj = switch (artifact_val) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        const pkg_val = artifact_obj.get("pkg") orelse continue;
+        const pkg_arr = switch (pkg_val) {
+            .array => |a| a,
+            else => continue,
+        };
+        if (pkg_arr.items.len == 0) continue;
+
+        const source_raw = switch (pkg_arr.items[0]) {
+            .string => |s| s,
+            else => continue,
+        };
+
+        var allow_untrusted = false;
+        if (pkg_arr.items.len > 1) {
+            if (asObject(pkg_arr.items[1])) |opts| {
+                allow_untrusted = jsonBool(opts, "allow_untrusted") orelse false;
+            }
+        }
+
+        const source = try allocator.dupe(u8, cleanArtifactPath(source_raw));
+        errdefer allocator.free(source);
+
+        try result.append(allocator, .{ .source = source, .allow_untrusted = allow_untrusted });
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
+/// Parse a cask's `uninstall` stanza; each directive value is a string or an
+/// array of them. Unimplemented directives are named in `unsupported` rather
+/// than dropped, so the caller can say why it is deferring to brew.
+fn parseUninstallPlan(allocator: Allocator, obj: std.json.ObjectMap) !UninstallPlan {
+    var pkgutil = std.ArrayList([]const u8){};
+    var delete = std.ArrayList([]const u8){};
+    var rmdir = std.ArrayList([]const u8){};
+    var trash = std.ArrayList([]const u8){};
+    var unsupported = std.ArrayList([]const u8){};
+
+    errdefer {
+        for ([_]*std.ArrayList([]const u8){ &pkgutil, &delete, &rmdir, &trash, &unsupported }) |list| {
+            for (list.items) |s| allocator.free(s);
+            list.deinit(allocator);
+        }
+    }
+
+    for (artifactsArray(obj)) |artifact_val| {
+        const artifact_obj = switch (artifact_val) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        const uninstall_val = artifact_obj.get("uninstall") orelse continue;
+        const uninstall_arr = switch (uninstall_val) {
+            .array => |a| a,
+            else => continue,
+        };
+
+        for (uninstall_arr.items) |directive_val| {
+            const directive = asObject(directive_val) orelse continue;
+            var it = directive.iterator();
+            while (it.next()) |kv| {
+                const key = kv.key_ptr.*;
+                const target: ?*std.ArrayList([]const u8) =
+                    if (mem.eql(u8, key, "pkgutil")) &pkgutil
+                    else if (mem.eql(u8, key, "delete")) &delete
+                    else if (mem.eql(u8, key, "rmdir")) &rmdir
+                    else if (mem.eql(u8, key, "trash")) &trash
+                    else null;
+
+                const list = target orelse {
+                    try appendUnique(allocator, &unsupported, key);
+                    continue;
+                };
+
+                // A pkgutil value may be a Ruby Regexp; guessing which
+                // receipts it covers could forget another package's.
+                const literal_only = mem.eql(u8, key, "pkgutil");
+                if (!try appendStringValues(allocator, list, kv.value_ptr.*, literal_only)) {
+                    try appendUnique(allocator, &unsupported, key);
+                }
+            }
+        }
+    }
+
+    return UninstallPlan{
+        .pkgutil = try pkgutil.toOwnedSlice(allocator),
+        .delete = try delete.toOwnedSlice(allocator),
+        .rmdir = try rmdir.toOwnedSlice(allocator),
+        .trash = try trash.toOwnedSlice(allocator),
+        .unsupported = try unsupported.toOwnedSlice(allocator),
+    };
+}
+
+/// Append a directive's string or string-array value to `list`. False when a
+/// value was skipped, telling the caller to mark the directive unsupported.
+fn appendStringValues(
+    allocator: Allocator,
+    list: *std.ArrayList([]const u8),
+    value: std.json.Value,
+    literal_only: bool,
+) !bool {
+    switch (value) {
+        .string => |s| {
+            if (literal_only and !pkgutilIdIsLiteral(s)) return false;
+            try list.append(allocator, try allocator.dupe(u8, s));
+            return true;
+        },
+        .array => |items| {
+            var complete = true;
+            for (items.items) |item| {
+                const s = switch (item) {
+                    .string => |v| v,
+                    else => {
+                        complete = false;
+                        continue;
+                    },
+                };
+                if (literal_only and !pkgutilIdIsLiteral(s)) {
+                    complete = false;
+                    continue;
+                }
+                try list.append(allocator, try allocator.dupe(u8, s));
+            }
+            return complete;
+        },
+        else => return false,
+    }
+}
+
+/// Append `value` to `list` unless it is already present.
+fn appendUnique(allocator: Allocator, list: *std.ArrayList([]const u8), value: []const u8) !void {
+    for (list.items) |existing| {
+        if (mem.eql(u8, existing, value)) return;
+    }
+    try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+/// True when a pkgutil ID is a plain package identifier (reverse-DNS-ish)
+/// rather than a regex. A mis-expanded pattern would forget other packages.
+fn pkgutilIdIsLiteral(id: []const u8) bool {
+    if (id.len == 0) return false;
+    for (id) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == '+';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// Strip known prefixes from cask binary artifact paths.
 /// Removes "$HOMEBREW_PREFIX/Caskroom/{token}/{version}/" and "$APPDIR/" prefixes.
 fn cleanArtifactPath(path: []const u8) []const u8 {
@@ -505,6 +725,24 @@ fn asObject(val: std.json.Value) ?std.json.ObjectMap {
     };
 }
 
+/// Whether bru can install a cask, and if not, why.
+pub const Installability = enum {
+    ok,
+    /// No artifact kind bru handles (font, installer, manpage, ...).
+    no_artifacts,
+    /// Installs as root but declares uninstall steps bru cannot perform, so
+    /// bru could not take it back out again.
+    unremovable,
+};
+
+/// Single source of truth for "should bru handle this cask itself?" — install
+/// and upgrade must agree, or upgrade becomes a way around the install gate.
+pub fn installability(c: ResolvedCask) Installability {
+    if (c.binaries.len == 0 and c.apps.len == 0 and c.pkgs.len == 0) return .no_artifacts;
+    if (c.pkgs.len > 0 and c.uninstall.unsupported.len > 0) return .unremovable;
+    return .ok;
+}
+
 /// Free a ResolvedCask and all its owned memory.
 pub fn freeResolvedCask(allocator: Allocator, c: ResolvedCask) void {
     allocator.free(c.token);
@@ -522,6 +760,17 @@ pub fn freeResolvedCask(allocator: Allocator, c: ResolvedCask) void {
         allocator.free(a.target);
     }
     allocator.free(c.apps);
+    for (c.pkgs) |p| allocator.free(p.source);
+    allocator.free(c.pkgs);
+    freeUninstallPlan(allocator, c.uninstall);
+}
+
+/// Free an UninstallPlan and all its owned strings.
+pub fn freeUninstallPlan(allocator: Allocator, plan: UninstallPlan) void {
+    for ([_][][]const u8{ plan.pkgutil, plan.delete, plan.rmdir, plan.trash, plan.unsupported }) |list| {
+        for (list) |s| allocator.free(s);
+        allocator.free(list);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +964,211 @@ test "parseResolvedCask app artifact with target rename" {
     try std.testing.expectEqualStrings("Dest.app", resolved.apps[0].target);
 }
 
+// ---------------------------------------------------------------------------
+// pkg artifacts — shapes below are real payloads from the cask API.
+// ---------------------------------------------------------------------------
+
+test "parseResolvedCask parses pkg artifact and pkgutil uninstall id" {
+    const allocator = std.testing.allocator;
+
+    const json_bytes =
+        \\{
+        \\  "token": "session-manager-plugin",
+        \\  "version": "1.2.835.0",
+        \\  "url": "https://example.com/session-manager-plugin.pkg",
+        \\  "sha256": "abc123",
+        \\  "name": ["Session Manager Plugin for the AWS CLI"],
+        \\  "artifacts": [
+        \\    {"uninstall": [{"pkgutil": "session-manager-plugin"}]},
+        \\    {"pkg": ["session-manager-plugin.pkg"]},
+        \\    {"binary": ["/usr/local/sessionmanagerplugin/bin/session-manager-plugin"], "target": "$HOMEBREW_PREFIX/bin/session-manager-plugin"},
+        \\    {"zap": [{"trash": "/Library/LaunchDaemons/SessionManagerPlugin.plist"}]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.pkgs.len);
+    try std.testing.expectEqualStrings("session-manager-plugin.pkg", resolved.pkgs[0].source);
+    try std.testing.expectEqual(false, resolved.pkgs[0].allow_untrusted);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.pkgutil.len);
+    try std.testing.expectEqualStrings("session-manager-plugin", resolved.uninstall.pkgutil[0]);
+
+    // pkgutil-only: bru can fully undo this install, so no gate.
+    try std.testing.expectEqual(@as(usize, 0), resolved.uninstall.unsupported.len);
+
+    // Absolute: it lives where the pkg put it, not in the Caskroom.
+    try std.testing.expectEqual(@as(usize, 1), resolved.binaries.len);
+    try std.testing.expectEqualStrings(
+        "/usr/local/sessionmanagerplugin/bin/session-manager-plugin",
+        resolved.binaries[0].source,
+    );
+    try std.testing.expectEqualStrings("session-manager-plugin", resolved.binaries[0].target);
+
+    // No app bundle, and the zap stanza must not be mistaken for one.
+    try std.testing.expectEqual(@as(usize, 0), resolved.apps.len);
+}
+
+test "parseResolvedCask parses pkg allow_untrusted and array pkgutil ids" {
+    const allocator = std.testing.allocator;
+
+    const json_bytes =
+        \\{
+        \\  "token": "example",
+        \\  "version": "1.0",
+        \\  "url": "https://example.com/x.dmg",
+        \\  "sha256": "abc",
+        \\  "name": ["Example"],
+        \\  "artifacts": [
+        \\    {"pkg": ["Installer.pkg", {"allow_untrusted": true}]},
+        \\    {"uninstall": [{"pkgutil": ["com.example.one", "com.example.two"]}]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.pkgs.len);
+    try std.testing.expectEqualStrings("Installer.pkg", resolved.pkgs[0].source);
+    try std.testing.expectEqual(true, resolved.pkgs[0].allow_untrusted);
+
+    try std.testing.expectEqual(@as(usize, 2), resolved.uninstall.pkgutil.len);
+    try std.testing.expectEqualStrings("com.example.one", resolved.uninstall.pkgutil[0]);
+    try std.testing.expectEqualStrings("com.example.two", resolved.uninstall.pkgutil[1]);
+}
+
+test "parseUninstallPlan rejects regex pkgutil patterns as unsupported" {
+    const allocator = std.testing.allocator;
+
+    // brew allows a Regexp for pkgutil:. Forgetting receipts by a pattern bru
+    // cannot evaluate risks clobbering unrelated packages, so these are dropped.
+    const json_bytes =
+        \\{
+        \\  "token": "example",
+        \\  "version": "1.0",
+        \\  "url": "https://example.com/x.pkg",
+        \\  "sha256": "abc",
+        \\  "name": ["Example"],
+        \\  "artifacts": [
+        \\    {"uninstall": [{"pkgutil": ["com.example.plain", "com\\.example\\..*", "com.example.*"]}]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.pkgutil.len);
+    try std.testing.expectEqualStrings("com.example.plain", resolved.uninstall.pkgutil[0]);
+
+    // Dropping a pattern makes the uninstall incomplete, so the gate must fire.
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.unsupported.len);
+    try std.testing.expectEqualStrings("pkgutil", resolved.uninstall.unsupported[0]);
+}
+
+test "parseResolvedCask leaves pkg fields empty for a plain app cask" {
+    const allocator = std.testing.allocator;
+
+    const json_bytes =
+        \\{
+        \\  "token": "chrome",
+        \\  "version": "1.0",
+        \\  "url": "https://example.com/x.dmg",
+        \\  "sha256": "abc",
+        \\  "name": ["Chrome"],
+        \\  "artifacts": [{"app": ["Google Chrome.app"]}]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 0), resolved.pkgs.len);
+    try std.testing.expect(resolved.uninstall.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), resolved.uninstall.unsupported.len);
+}
+
+test "parseUninstallPlan collects delete, rmdir, and trash paths" {
+    const allocator = std.testing.allocator;
+
+    // adguard's shape: delete as an array, rmdir as a bare string.
+    const json_bytes =
+        \\{
+        \\  "token": "example",
+        \\  "version": "1.0",
+        \\  "url": "https://example.com/x.pkg",
+        \\  "sha256": "abc",
+        \\  "name": ["Example"],
+        \\  "artifacts": [
+        \\    {"pkg": ["Example.pkg"]},
+        \\    {"uninstall": [{
+        \\      "pkgutil": "com.example.app",
+        \\      "delete": ["/Library/Application Support/Example", "~/Library/Logs/Example"],
+        \\      "rmdir": "/Library/Application Support/Example Software",
+        \\      "trash": "/Library/Audio/Plug-Ins/HAL/Example.driver"
+        \\    }]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 2), resolved.uninstall.delete.len);
+    try std.testing.expectEqualStrings("/Library/Application Support/Example", resolved.uninstall.delete[0]);
+    // Tilde paths survive parsing verbatim; expansion happens at uninstall.
+    try std.testing.expectEqualStrings("~/Library/Logs/Example", resolved.uninstall.delete[1]);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.rmdir.len);
+    try std.testing.expectEqualStrings("/Library/Application Support/Example Software", resolved.uninstall.rmdir[0]);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.trash.len);
+    try std.testing.expectEqual(@as(usize, 0), resolved.uninstall.unsupported.len);
+}
+
+test "parseUninstallPlan reports directives bru cannot carry out" {
+    const allocator = std.testing.allocator;
+
+    // 60% of pkg casks look like this.
+    const json_bytes =
+        \\{
+        \\  "token": "example",
+        \\  "version": "1.0",
+        \\  "url": "https://example.com/x.pkg",
+        \\  "sha256": "abc",
+        \\  "name": ["Example"],
+        \\  "artifacts": [
+        \\    {"pkg": ["Example.pkg"]},
+        \\    {"uninstall": [
+        \\      {"launchctl": "com.example.daemon", "quit": "com.example.app"},
+        \\      {"pkgutil": "com.example.app"},
+        \\      {"launchctl": "com.example.other"}
+        \\    ]}
+        \\  ]
+        \\}
+    ;
+
+    const resolved = try parseResolvedCaskWithTag(allocator, json_bytes, "");
+    defer freeResolvedCask(allocator, resolved);
+
+    try std.testing.expectEqual(@as(usize, 1), resolved.uninstall.pkgutil.len);
+
+    // Unsupported ones are named once each for the gate message.
+    try std.testing.expectEqual(@as(usize, 2), resolved.uninstall.unsupported.len);
+    var saw_launchctl = false;
+    var saw_quit = false;
+    for (resolved.uninstall.unsupported) |d| {
+        if (mem.eql(u8, d, "launchctl")) saw_launchctl = true;
+        if (mem.eql(u8, d, "quit")) saw_quit = true;
+    }
+    try std.testing.expect(saw_launchctl);
+    try std.testing.expect(saw_quit);
+}
+
 test "cleanArtifactPath strips APPDIR prefix" {
     try std.testing.expectEqualStrings(
         "Visual Studio Code.app/Contents/Resources/app/bin/code",
@@ -878,4 +1332,38 @@ test "currentMacOSVariationTag returns empty for unknown release" {
     var buf: [64]u8 = undefined;
     const tag = darwinReleaseToVariationTag(99, .aarch64, &buf);
     try std.testing.expectEqualStrings("", tag);
+}
+
+test "installability gates pkg casks bru could not uninstall" {
+    const empty_plan = UninstallPlan{ .pkgutil = &.{}, .delete = &.{}, .rmdir = &.{}, .trash = &.{}, .unsupported = &.{} };
+    var base = ResolvedCask{
+        .token = "x",
+        .version = "1",
+        .url = "",
+        .sha256 = "",
+        .name = "X",
+        .binaries = &.{},
+        .apps = &.{},
+        .pkgs = &.{},
+        .uninstall = empty_plan,
+    };
+    try std.testing.expectEqual(Installability.no_artifacts, installability(base));
+
+    var pkgs = [_]PkgArtifact{.{ .source = "a.pkg", .allow_untrusted = false }};
+    base.pkgs = &pkgs;
+    try std.testing.expectEqual(Installability.ok, installability(base));
+
+    // A pkg cask needing launchctl must be refused by BOTH install and
+    // upgrade — upgrade is otherwise a way around the gate, since brew fills
+    // the same Caskroom that `bru upgrade` scans.
+    var unsupported = [_][]const u8{"launchctl"};
+    base.uninstall.unsupported = &unsupported;
+    try std.testing.expectEqual(Installability.unremovable, installability(base));
+
+    // The same stanza on an app cask is not gated: bru never installs it as
+    // root, so there is nothing unremovable to guard against.
+    base.pkgs = &.{};
+    var apps = [_]AppArtifact{.{ .source = "A.app", .target = "A.app" }};
+    base.apps = &apps;
+    try std.testing.expectEqual(Installability.ok, installability(base));
 }

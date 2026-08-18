@@ -396,15 +396,27 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
     };
     defer cask_mod.freeResolvedCask(allocator, resolved);
 
-    // Only bail when the cask declares neither CLI binaries nor app
-    // bundles — those are the two artifact kinds bru can install. (Casks
-    // limited to `pkg`/`installer`/`font` artifacts still fall through to
-    // a real brew install via the `Use: brew install --cask ...` hint.)
-    if (resolved.binaries.len == 0 and resolved.apps.len == 0) {
-        err_out.warn("No installable artifacts for cask \"{s}\".", .{name});
-        err_out.print("This cask uses an artifact type bru can't handle yet (e.g. pkg, font).\n", .{});
-        err_out.print("Use: brew install --cask {s}\n", .{name});
-        return;
+    switch (cask_mod.installability(resolved)) {
+        .ok => {},
+        .no_artifacts => {
+            err_out.warn("No installable artifacts for cask \"{s}\".", .{name});
+            err_out.print("This cask uses an artifact type bru can't handle yet (e.g. font, installer).\n", .{});
+            err_out.print("Use: brew install --cask {s}\n", .{name});
+            return;
+        },
+        // The `uninstall` stanza is the only description of how to take a
+        // root-installed pkg back out. If bru can't perform it, installing
+        // here would leave the user something only brew can remove.
+        .unremovable => {
+            // No defer: execBrew is noreturn.
+            const directives = std.mem.join(allocator, ", ", resolved.uninstall.unsupported) catch "";
+            err_out.warn(
+                "Cask \"{s}\" needs uninstall steps bru doesn't support yet: {s}.",
+                .{ name, directives },
+            );
+            err_out.print("Deferring to brew so it stays uninstallable.\n", .{});
+            fallback.execBrew(allocator, &.{ "bru", "install", "--cask", name });
+        },
     }
 
     // Run the cask install pipeline.
