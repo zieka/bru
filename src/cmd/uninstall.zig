@@ -48,6 +48,8 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
     const out = Output.init(config.no_color);
     const err_out = Output.initErr(config.no_color);
 
+    var had_failure = false;
+
     // 3. Process each formula name.
     for (parsed.formula_names.items) |raw_name| {
         // Extract simple name from tap-prefixed names (e.g. "user/tap/pkg" -> "pkg").
@@ -81,6 +83,8 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
         // Set up linker.
         var linker = Linker.init(allocator, config.prefix);
 
+        var artifact_failures: usize = 0;
+
         // For each version: unlink, then delete keg directory.
         for (installed_versions) |version| {
             var keg_buf: [fs.max_path_bytes]u8 = undefined;
@@ -98,12 +102,31 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
             // the keg alone would leave those behind, so undo them while the
             // keg, which holds the recorded uninstall plan, still exists.
             if (is_cask) {
-                cask_install.uninstallCaskArtifacts(allocator, keg_path, out, err_out);
+                // A brew-installed cask has no plan of ours. Deleting its keg
+                // would destroy the entry brew needs to clean up, leaving the
+                // payload removable by neither tool.
+                if (!cask_install.hasUninstallPlan(keg_path) and cask_install.looksBrewInstalled(keg_path)) {
+                    err_out.warn("{s} {s} was installed by brew; bru has no record of its payload.", .{ name, version });
+                    err_out.print("Use: brew uninstall --cask {s}\n", .{name});
+                    artifact_failures += 1;
+                    continue;
+                }
+
+                const failures = cask_install.uninstallCaskArtifacts(allocator, keg_path, out, err_out) catch {
+                    artifact_failures += 1;
+                    continue; // keg intentionally left in place
+                };
+                if (failures > 0) {
+                    artifact_failures += failures;
+                    err_out.err("{s} {s}: {d} artifact(s) left on disk — keeping the keg as the record.", .{ name, version, failures });
+                    continue;
+                }
             }
 
             // Delete the keg directory tree.
             fs.deleteTreeAbsolute(keg_path) catch |del_err| {
                 err_out.err("Could not remove {s}/{s}: {s}", .{ name, version, @errorName(del_err) });
+                artifact_failures += 1;
             };
         }
 
@@ -116,7 +139,14 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
             }
         }
 
-        // Print completion section.
+        // Only claim success when nothing was left behind; a half-removed
+        // cask reporting "is uninstalled" is how root-owned files get stranded.
+        if (artifact_failures > 0) {
+            err_out.err("{s} was not fully uninstalled.", .{name});
+            had_failure = true;
+            continue;
+        }
+
         const done_title = std.fmt.allocPrint(allocator, "{s} is uninstalled", .{name}) catch {
             err_out.err("Failed to format completion message for {s}.", .{name});
             continue;
@@ -132,17 +162,13 @@ pub fn uninstallCmd(allocator: Allocator, args: []const []const u8, config: Conf
             state.save() catch {};
         }
     }
+
+    if (had_failure) std.process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-test "uninstallCmd compiles and has correct signature" {
-    // Smoke test: verifies the function signature is correct and the module compiles.
-    const handler: @import("../dispatch.zig").CommandFn = uninstallCmd;
-    _ = handler;
-}
 
 test "parseUninstallArgs extracts single package name" {
     const args = &[_][]const u8{"wget"};

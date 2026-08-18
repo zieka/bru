@@ -632,11 +632,22 @@ fn parseUninstallPlan(allocator: Allocator, obj: std.json.ObjectMap) !UninstallP
         }
     }
 
+    // toOwnedSlice empties the list on success, so a later failure would put
+    // the earlier ones out of the errdefer's reach.
+    const pkgutil_owned = try pkgutil.toOwnedSlice(allocator);
+    errdefer freeStrings(allocator, pkgutil_owned);
+    const delete_owned = try delete.toOwnedSlice(allocator);
+    errdefer freeStrings(allocator, delete_owned);
+    const rmdir_owned = try rmdir.toOwnedSlice(allocator);
+    errdefer freeStrings(allocator, rmdir_owned);
+    const trash_owned = try trash.toOwnedSlice(allocator);
+    errdefer freeStrings(allocator, trash_owned);
+
     return UninstallPlan{
-        .pkgutil = try pkgutil.toOwnedSlice(allocator),
-        .delete = try delete.toOwnedSlice(allocator),
-        .rmdir = try rmdir.toOwnedSlice(allocator),
-        .trash = try trash.toOwnedSlice(allocator),
+        .pkgutil = pkgutil_owned,
+        .delete = delete_owned,
+        .rmdir = rmdir_owned,
+        .trash = trash_owned,
         .unsupported = try unsupported.toOwnedSlice(allocator),
     };
 }
@@ -739,7 +750,7 @@ pub const Installability = enum {
 /// and upgrade must agree, or upgrade becomes a way around the install gate.
 pub fn installability(c: ResolvedCask) Installability {
     if (c.binaries.len == 0 and c.apps.len == 0 and c.pkgs.len == 0) return .no_artifacts;
-    if (c.pkgs.len > 0 and c.uninstall.unsupported.len > 0) return .unremovable;
+    if (c.pkgs.len > 0 and (c.uninstall.unsupported.len > 0 or c.uninstall.isEmpty())) return .unremovable;
     return .ok;
 }
 
@@ -763,6 +774,11 @@ pub fn freeResolvedCask(allocator: Allocator, c: ResolvedCask) void {
     for (c.pkgs) |p| allocator.free(p.source);
     allocator.free(c.pkgs);
     freeUninstallPlan(allocator, c.uninstall);
+}
+
+fn freeStrings(allocator: Allocator, list: []const []const u8) void {
+    for (list) |s| allocator.free(s);
+    allocator.free(list);
 }
 
 /// Free an UninstallPlan and all its owned strings.
@@ -1349,8 +1365,14 @@ test "installability gates pkg casks bru could not uninstall" {
     };
     try std.testing.expectEqual(Installability.no_artifacts, installability(base));
 
+    // A pkg cask with no uninstall stanza is equally unremovable: nothing gets
+    // recorded, so `bru uninstall` would orphan the whole root payload.
     var pkgs = [_]PkgArtifact{.{ .source = "a.pkg", .allow_untrusted = false }};
     base.pkgs = &pkgs;
+    try std.testing.expectEqual(Installability.unremovable, installability(base));
+
+    var ids = [_][]const u8{"com.example.a"};
+    base.uninstall.pkgutil = &ids;
     try std.testing.expectEqual(Installability.ok, installability(base));
 
     // A pkg cask needing launchctl must be refused by BOTH install and

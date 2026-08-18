@@ -102,8 +102,10 @@ pub fn installCask(
     //     for pkg casks; app casks are left with their prior behaviour rather
     //     than gaining half a teardown from this change.
     if (resolved.pkgs.len > 0 and !resolved.uninstall.isEmpty()) {
-        writeUninstallPlan(allocator, version_dir, resolved.uninstall) catch |receipt_err| {
-            err_out.warn("Could not record uninstall plan for {s}: {s}", .{ resolved.token, @errorName(receipt_err) });
+        writeUninstallPlan(allocator, version_dir, resolved.uninstall) catch |plan_err| {
+            err_out.err("Could not record the uninstall plan for {s}: {s}", .{ resolved.token, @errorName(plan_err) });
+            err_out.print("Not running installer — without this file bru could not undo the install.\n", .{});
+            return plan_err;
         };
     }
 
@@ -125,13 +127,14 @@ pub fn installCask(
             };
 
             out.print("Running installer for {s} (requires sudo)...\n", .{pkg.source});
+
+            // From here the system may have been mutated, so keep version_dir
+            // (and the plan inside it) regardless of how this turns out.
+            commit = true;
             runPkgInstaller(allocator, pkg_path, pkg.allow_untrusted) catch |install_err| {
                 err_out.err("installer failed for \"{s}\": {s}", .{ pkg.source, @errorName(install_err) });
 
-                // A partial run leaves files outside the Caskroom; wiping
-                // version_dir would strand them with no record to undo them.
                 if (anyReceiptAppeared(allocator, resolved.uninstall.pkgutil, receipts_before)) {
-                    commit = true;
                     err_out.warn(
                         "{s} is partially installed. Run: bru uninstall {s}",
                         .{ resolved.token, resolved.token },
@@ -342,6 +345,14 @@ fn extractZip(allocator: Allocator, zip_path: []const u8, dest_dir: []const u8) 
 /// deleting the keg".
 pub const uninstall_plan_file = ".bru-uninstall.json";
 
+/// WARNING: absolute, never PATH-resolved. This tool's output builds the argv
+/// for a root `rm`, and user-writable dirs routinely precede /usr/sbin in PATH.
+const pkgutil_bin = "/usr/sbin/pkgutil";
+
+/// `pkgutil --files` prints one path per line; Child.run's 50 KiB default
+/// truncates any package with an .app bundle into StdoutStreamTooLong.
+const pkgutil_max_output = 16 * 1024 * 1024;
+
 /// Stage a bare `.pkg` download into the version dir under the name the cask's
 /// `pkg` artifact declares — the URL basename is not it (often percent-encoded).
 // Clone, not symlink: `bru cleanup` may prune the content-addressed blob store.
@@ -429,7 +440,7 @@ fn writeUninstallPlan(allocator: Allocator, version_dir: []const u8, plan: Unins
 fn receiptRegistered(allocator: Allocator, id: []const u8) bool {
     const result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "pkgutil", "--pkg-info", id },
+        .argv = &.{ pkgutil_bin, "--pkg-info", id },
     }) catch return false;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -501,45 +512,80 @@ pub fn readUninstallPlan(allocator: Allocator, version_dir: []const u8) !Uninsta
 }
 
 
+/// True when this version dir carries an uninstall plan bru wrote.
+pub fn hasUninstallPlan(version_dir: []const u8) bool {
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ version_dir, uninstall_plan_file }) catch return false;
+    fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// True when brew owns this cask: it writes `.metadata` beside the version dir
+/// and bru never does.
+pub fn looksBrewInstalled(version_dir: []const u8) bool {
+    const parent = fs.path.dirname(version_dir) orelse return false;
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/.metadata", .{parent}) catch return false;
+    fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
 /// Undo a cask version's out-of-Caskroom artifacts, in brew's directive order
 /// so payload files are gone before the directories that held them.
-// Best-effort throughout: one stubborn path must not block the rest.
+///
+/// Returns the number of artifacts that could not be removed. Callers must not
+/// report a clean uninstall, or delete the keg, when this is non-zero — the
+/// keg holds the only record of what was installed as root.
 pub fn uninstallCaskArtifacts(
     allocator: Allocator,
     version_dir: []const u8,
     out: Output,
     err_out: Output,
-) void {
-    const plan = readUninstallPlan(allocator, version_dir) catch return;
+) error{UninstallPlanUnreadable}!usize {
+    // An unreadable plan is NOT "nothing to undo": a truncated write looks
+    // exactly like this, and the caller would delete the only manifest.
+    const plan = readUninstallPlan(allocator, version_dir) catch |read_err| {
+        err_out.err("Could not read the uninstall plan in {s}: {s}", .{ version_dir, @errorName(read_err) });
+        err_out.print("Refusing to remove the keg — it records what this cask installed as root.\n", .{});
+        return error.UninstallPlanUnreadable;
+    };
     defer cask.freeUninstallPlan(allocator, plan);
-    if (plan.isEmpty()) return;
+    if (plan.isEmpty()) return 0;
+
+    var failures: usize = 0;
 
     for (plan.pkgutil) |id| {
-        // Doubles as the "already gone" check — a re-run, or brew removed it.
-        const root = (pkgReceiptRoot(allocator, id) catch null) orelse continue;
+        const root = pkgReceiptRoot(allocator, id) catch |query_err| {
+            err_out.err("Could not query receipt {s}: {s} — its files were left in place.", .{ id, @errorName(query_err) });
+            failures += 1;
+            continue;
+        } orelse continue; // genuinely not registered: a re-run, or brew removed it
         defer allocator.free(root);
 
         out.print("Removing package {s}...\n", .{id});
 
-        removePkgPaths(allocator, id, root, .files) catch |rm_err| {
-            err_out.warn("Could not remove files for {s}: {s}", .{ id, @errorName(rm_err) });
-        };
-        removePkgPaths(allocator, id, root, .dirs) catch {};
-
-        forgetPkgReceipt(allocator, id) catch |forget_err| {
-            err_out.warn("Could not forget receipt {s}: {s}", .{ id, @errorName(forget_err) });
-        };
+        if (removePkgPaths(allocator, id, root, .files)) |_| {
+            removePkgPaths(allocator, id, root, .dirs) catch |dir_err| {
+                err_out.warn("Could not remove empty dirs for {s}: {s}", .{ id, @errorName(dir_err) });
+            };
+            forgetPkgReceipt(allocator, id) catch |forget_err| {
+                err_out.warn("Could not forget receipt {s}: {s}", .{ id, @errorName(forget_err) });
+                failures += 1;
+            };
+        } else |rm_err| {
+            // Keep the receipt: `pkgutil --files` is the only way to enumerate
+            // what was left behind, and --forget destroys that manifest.
+            err_out.err("Could not remove files for {s}: {s}", .{ id, @errorName(rm_err) });
+            err_out.print("Keeping the receipt so `pkgutil --files {s}` can still list them.\n", .{id});
+            failures += 1;
+        }
     }
 
-    for (plan.delete) |raw| {
-        withExpandedPath(allocator, raw, err_out, deletePath);
-    }
-    for (plan.trash) |raw| {
-        withExpandedPath(allocator, raw, err_out, trashPath);
-    }
-    for (plan.rmdir) |raw| {
-        withExpandedPath(allocator, raw, err_out, rmdirPath);
-    }
+    for (plan.delete) |raw| failures += withExpandedPath(allocator, raw, err_out, deletePath);
+    for (plan.trash) |raw| failures += withExpandedPath(allocator, raw, err_out, trashPath);
+    for (plan.rmdir) |raw| failures += withExpandedPath(allocator, raw, err_out, rmdirPath);
+
+    return failures;
 }
 
 /// Expand `raw`, screen it against the system-directory guard, and hand it to
@@ -549,31 +595,52 @@ fn withExpandedPath(
     raw: []const u8,
     err_out: Output,
     action: *const fn (Allocator, []const u8) anyerror!void,
-) void {
-    const path = expandPath(allocator, raw) catch return;
+) usize {
+    const path = expandPath(allocator, raw) catch |err| {
+        err_out.warn("Could not expand uninstall path \"{s}\": {s}", .{ raw, @errorName(err) });
+        return 1;
+    };
     defer allocator.free(path);
 
     if (!fs.path.isAbsolute(path)) {
         err_out.warn("Skipping non-absolute uninstall path \"{s}\".", .{raw});
-        return;
+        return 1;
     }
 
     // Compare the resolved path: a plain string check lets "/usr/local/.." or
     // a symlinked parent walk straight past the guard, and this runs as root.
     var real_buf: [fs.max_path_bytes]u8 = undefined;
-    const probe = fs.cwd().realpath(path, &real_buf) catch path;
+    const probe = fs.cwd().realpath(path, &real_buf) catch |err| switch (err) {
+        // Nothing there to remove.
+        error.FileNotFound => return 0,
+        // Guard degraded to a plain string compare — decline rather than
+        // run `rm -rf` as root on a path we could not resolve.
+        else => {
+            err_out.warn("Could not resolve \"{s}\" ({s}); leaving it in place.", .{ path, @errorName(err) });
+            return 1;
+        },
+    };
     if (isSystemDirectory(probe) or isSystemDirectory(path)) {
         err_out.warn("Refusing to remove system path \"{s}\".", .{path});
-        return;
+        return 1;
     }
 
     action(allocator, path) catch |err| {
         err_out.warn("Could not remove \"{s}\": {s}", .{ path, @errorName(err) });
+        return 1;
     };
+    return 0;
 }
 
 /// Resolve `~` and `$HOME` prefixes in a cask-declared path. Caller owns it.
 fn expandPath(allocator: Allocator, raw: []const u8) ![]u8 {
+    const tilde = mem.startsWith(u8, raw, "~") or mem.startsWith(u8, raw, "$HOME");
+    if (tilde and std.posix.getuid() == 0) {
+        // HOME is /var/root under sudo; expanding would target the wrong user
+        // and silently remove nothing.
+        return error.HomeRelativePathAsRoot;
+    }
+
     const home = std.posix.getenv("HOME") orelse return try allocator.dupe(u8, raw);
 
     if (mem.eql(u8, raw, "~")) return try allocator.dupe(u8, home);
@@ -591,9 +658,13 @@ fn expandPath(allocator: Allocator, raw: []const u8) ![]u8 {
 // Unprivileged first, escalating only on permission failure, so a cask owning
 // nothing outside $HOME never prompts for a password.
 fn deletePath(allocator: Allocator, path: []const u8) !void {
-    fs.cwd().access(path, .{}) catch return; // already gone
     fs.deleteTreeAbsolute(path) catch |err| switch (err) {
-        error.AccessDenied, error.FileBusy, error.ReadOnlyFileSystem => try sudoRemove(allocator, path),
+        error.FileNotFound => {},
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.FileBusy,
+        error.ReadOnlyFileSystem,
+        => try sudoRemove(allocator, path),
         else => return err,
     };
 }
@@ -604,28 +675,33 @@ fn sudoRemove(allocator: Allocator, path: []const u8) !void {
     }
 }
 
-/// Move a path to the user's Trash, as brew's `trash:` does, falling back to
-/// deletion when the move can't be made (cross-volume, root-owned) — as brew does.
+/// Move a path to the user's Trash, as brew's `trash:` does.
+// Reports failure rather than deleting: `trash:` means the user may want these
+// back, so a silent permanent delete is the one outcome to avoid.
 fn trashPath(allocator: Allocator, path: []const u8) !void {
+    _ = allocator;
     fs.cwd().access(path, .{}) catch return; // already gone
 
-    const home = std.posix.getenv("HOME") orelse return deletePath(allocator, path);
-    const base = fs.path.basename(path);
+    // `trash:` exists so the user can get these back. Every fall-through below
+    // is a permanent delete, so none of them may happen quietly.
+    const home = std.posix.getenv("HOME") orelse {
+        return error.TrashUnavailable;
+    };
 
+    const base = fs.path.basename(path);
     var buf: [fs.max_path_bytes]u8 = undefined;
     const dest = std.fmt.bufPrint(&buf, "{s}/.Trash/{s}", .{ home, base }) catch
-        return deletePath(allocator, path);
+        return error.TrashUnavailable;
 
     if (fs.cwd().access(dest, .{})) |_| {
         // Occupied — disambiguate the way Finder does.
         var buf2: [fs.max_path_bytes]u8 = undefined;
         const alt = std.fmt.bufPrint(&buf2, "{s}/.Trash/{s} {d}", .{ home, base, std.time.timestamp() }) catch
-            return deletePath(allocator, path);
-        fs.renameAbsolute(path, alt) catch return deletePath(allocator, path);
-        return;
+            return error.TrashUnavailable;
+        return fs.renameAbsolute(path, alt);
     } else |_| {}
 
-    fs.renameAbsolute(path, dest) catch return deletePath(allocator, path);
+    try fs.renameAbsolute(path, dest);
 }
 
 /// Remove a directory only if empty: a populated one is shared with something
@@ -643,7 +719,7 @@ fn rmdirPath(allocator: Allocator, path: []const u8) !void {
 fn pkgReceiptRoot(allocator: Allocator, id: []const u8) !?[]const u8 {
     const result = try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "pkgutil", "--pkg-info", id },
+        .argv = &.{ pkgutil_bin, "--pkg-info", id },
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -681,7 +757,8 @@ fn removePkgPaths(allocator: Allocator, id: []const u8, root: []const u8, kind: 
 
     const listing = try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "pkgutil", only_flag, "--files", id },
+        .argv = &.{ pkgutil_bin, only_flag, "--files", id },
+        .max_output_bytes = pkgutil_max_output,
     });
     defer allocator.free(listing.stdout);
     defer allocator.free(listing.stderr);
@@ -732,12 +809,7 @@ fn removePkgPaths(allocator: Allocator, id: []const u8, root: []const u8, kind: 
         argv.clearRetainingCapacity();
         try argv.appendSlice(allocator, cmd);
 
-        var bytes: usize = 0;
-        var end = start;
-        while (end < paths.items.len and (end == start or bytes + paths.items[end].path.len + 1 <= batch_bytes)) {
-            bytes += paths.items[end].path.len + 1;
-            end += 1;
-        }
+        const end = nextBatchEnd(paths.items, start, batch_bytes);
         for (paths.items[start..end]) |p| try argv.append(allocator, p.path);
 
         const code = try runAsRoot(allocator, argv.items, kind == .dirs);
@@ -798,7 +870,47 @@ fn isSystemDirectory(path: []const u8) bool {
     for (system_directories) |dir| {
         if (mem.eql(u8, trimmed, dir)) return true;
     }
+    return isProtectedHomeDirectory(trimmed);
+}
+
+/// $HOME itself and the top-level user directories. No shipping cask names
+/// these, but the guard's job is to bound what third-party metadata can hand
+/// to a root `rm`, and these are where the most is lost.
+fn isProtectedHomeDirectory(path: []const u8) bool {
+    const home = std.posix.getenv("HOME") orelse return false;
+    if (mem.eql(u8, path, home)) return true;
+
+    if (!mem.startsWith(u8, path, home)) return false;
+    const rest = path[home.len..];
+    if (rest.len == 0 or rest[0] != '/') return false;
+
+    const protected = [_][]const u8{
+        "Library",                   "Library/Application Support",
+        "Library/Caches",            "Library/Preferences",
+        "Library/Containers",        "Library/LaunchAgents",
+        "Documents",                 "Desktop",
+        "Downloads",                 "Movies",
+        "Music",                     "Pictures",
+        "Applications",              ".Trash",
+    };
+    for (protected) |p| {
+        if (mem.eql(u8, rest[1..], p)) return true;
+    }
     return false;
+}
+
+/// Index one past the last path that fits in `budget` bytes of argv, starting
+/// at `start`. Always advances by at least one so no path is ever skipped,
+/// even when a single path exceeds the budget on its own.
+fn nextBatchEnd(paths: []const DepthPath, start: usize, budget: usize) usize {
+    var bytes: usize = 0;
+    var end = start;
+    while (end < paths.len) : (end += 1) {
+        const cost = paths[end].path.len + 1;
+        if (end > start and bytes + cost > budget) break;
+        bytes += cost;
+    }
+    return end;
 }
 
 /// Order paths by descending component count so children sort before parents.
@@ -810,7 +922,7 @@ const DepthPath = struct { depth: usize, path: []const u8 };
 
 /// Drop a receipt so pkgutil no longer reports the package as installed.
 fn forgetPkgReceipt(allocator: Allocator, id: []const u8) !void {
-    if (try runAsRoot(allocator, &.{ "/usr/sbin/pkgutil", "--forget", id }, false) != 0) {
+    if (try runAsRoot(allocator, &.{ pkgutil_bin, "--forget", id }, false) != 0) {
         return error.PkgForgetFailed;
     }
 }
@@ -1052,13 +1164,6 @@ test "sniffArchiveKind returns unknown for unrecognized data" {
     try std.testing.expectEqual(ArchiveKind.unknown, try sniffArchiveKind(path));
 }
 
-test "cask_install compiles" {
-    // Verify this module compiles and links correctly.
-    _ = installCask;
-    _ = extractZip;
-    _ = extractTar;
-}
-
 test "stageBinary creates symlink and sets executable" {
     const allocator = std.testing.allocator;
 
@@ -1297,6 +1402,164 @@ test "isSystemDirectory shields OS directories from rmdir" {
     try std.testing.expect(!isSystemDirectory("/usr/local/sessionmanagerplugin"));
     try std.testing.expect(!isSystemDirectory("/usr/local/sessionmanagerplugin/bin"));
     try std.testing.expect(!isSystemDirectory("/Library/LaunchDaemons/SessionManagerPlugin.plist"));
+}
+
+test "isSystemDirectory shields the home directory and its top-level dirs" {
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    try std.testing.expect(isSystemDirectory(home));
+
+    for ([_][]const u8{ "Library", "Documents", "Library/Application Support", ".Trash" }) |sub| {
+        const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, sub });
+        defer allocator.free(p);
+        try std.testing.expect(isSystemDirectory(p));
+    }
+
+    // A cask's own directory under ~/Library stays removable.
+    const own = try std.fmt.allocPrint(allocator, "{s}/Library/Application Support/SomeVendor", .{home});
+    defer allocator.free(own);
+    try std.testing.expect(!isSystemDirectory(own));
+
+    // A sibling that merely shares the prefix is not the home dir.
+    const sibling = try std.fmt.allocPrint(allocator, "{s}-other/Library", .{home});
+    defer allocator.free(sibling);
+    try std.testing.expect(!isSystemDirectory(sibling));
+}
+
+test "expandPath refuses home-relative paths when running as root" {
+    if (std.posix.getuid() == 0) return error.SkipZigTest;
+    _ = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+
+    // Non-root: expansion works (covered elsewhere). The root refusal exists
+    // because HOME is /var/root under sudo, so expanding would target the
+    // wrong user and silently remove nothing while reporting success.
+    const allocator = std.testing.allocator;
+    const p = try expandPath(allocator, "~/Library/Logs/Ex");
+    defer allocator.free(p);
+    try std.testing.expect(fs.path.isAbsolute(p));
+}
+
+test "keg ownership decides whether uninstall may delete it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &buf);
+
+    const allocator = std.testing.allocator;
+    const version_dir = try std.fmt.allocPrint(allocator, "{s}/token/1.0", .{root});
+    defer allocator.free(version_dir);
+    try fs.cwd().makePath(version_dir);
+
+    // A bru-installed app cask: no plan, no brew metadata -> safe to delete.
+    try std.testing.expect(!hasUninstallPlan(version_dir));
+    try std.testing.expect(!looksBrewInstalled(version_dir));
+
+    // brew writes .metadata beside the version dir; bru never does. Deleting
+    // this keg would destroy the entry brew needs to clean up.
+    const meta = try std.fmt.allocPrint(allocator, "{s}/token/.metadata", .{root});
+    defer allocator.free(meta);
+    try fs.cwd().makePath(meta);
+    try std.testing.expect(looksBrewInstalled(version_dir));
+
+    // A recorded plan means bru owns the teardown even if brew touched it.
+    var plan_ids = [_][]const u8{"com.example.a"};
+    const plan = UninstallPlan{ .pkgutil = &plan_ids, .delete = &.{}, .rmdir = &.{}, .trash = &.{}, .unsupported = &.{} };
+    try writeUninstallPlan(allocator, version_dir, plan);
+    try std.testing.expect(hasUninstallPlan(version_dir));
+}
+
+test "an unreadable plan refuses the uninstall instead of reporting success" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const version_dir = try tmp.dir.realpath(".", &buf);
+
+    // A truncated write looks exactly like this. Treating it as "nothing to
+    // undo" would let the caller delete the only manifest for a root payload.
+    const f = try tmp.dir.createFile(uninstall_plan_file, .{});
+    try f.writeAll("{\"pkgutil\":[\"com.example.a\"");
+    f.close();
+
+    try std.testing.expectError(error.UnexpectedEndOfInput, readUninstallPlan(allocator, version_dir));
+
+    const quiet = Output{ .file = std.fs.File.stderr(), .use_color = false };
+    try std.testing.expectError(
+        error.UninstallPlanUnreadable,
+        uninstallCaskArtifacts(allocator, version_dir, quiet, quiet),
+    );
+}
+
+test "uninstallCaskArtifacts applies delete then rmdir, and refuses system paths" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [fs.max_path_bytes]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &buf);
+
+    try tmp.dir.makePath("payload/nested");
+    const f = try tmp.dir.createFile("payload/nested/file", .{});
+    f.close();
+    try tmp.dir.makePath("empty");
+    try tmp.dir.makePath("occupied");
+    const keep = try tmp.dir.createFile("occupied/other-owner", .{});
+    keep.close();
+
+    const payload = try std.fmt.allocPrint(allocator, "{s}/payload", .{root});
+    defer allocator.free(payload);
+    const empty = try std.fmt.allocPrint(allocator, "{s}/empty", .{root});
+    defer allocator.free(empty);
+    const occupied = try std.fmt.allocPrint(allocator, "{s}/occupied", .{root});
+    defer allocator.free(occupied);
+
+    // A cask aiming at a system directory must be refused, not obeyed: this
+    // list is the only thing between remote metadata and a root `rm -rf`.
+    var deletes = [_][]const u8{ payload, "/usr/local" };
+    var rmdirs = [_][]const u8{ empty, occupied };
+    // An id no receipt matches, so the pkgutil branch short-circuits (no sudo).
+    var ids = [_][]const u8{"com.bru.test.absent"};
+
+    const plan = UninstallPlan{ .pkgutil = &ids, .delete = &deletes, .rmdir = &rmdirs, .trash = &.{}, .unsupported = &.{} };
+    try writeUninstallPlan(allocator, root, plan);
+
+    const quiet = Output{ .file = std.fs.File.stderr(), .use_color = false };
+    const failures = try uninstallCaskArtifacts(allocator, root, quiet, quiet);
+
+    // The refused system path is reported, not silently skipped.
+    try std.testing.expectEqual(@as(usize, 1), failures);
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("payload", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("empty", .{}));
+    try tmp.dir.access("occupied/other-owner", .{}); // shared dir survives
+    try fs.cwd().access("/usr/local", .{}); // untouched
+}
+
+test "nextBatchEnd always advances and never exceeds its budget" {
+    const paths = [_]DepthPath{
+        .{ .depth = 1, .path = "/aaaa" }, // 5 + 1
+        .{ .depth = 1, .path = "/bbbb" },
+        .{ .depth = 1, .path = "/cccc" },
+    };
+
+    // Budget fits exactly two entries (6 bytes each).
+    try std.testing.expectEqual(@as(usize, 2), nextBatchEnd(&paths, 0, 12));
+    try std.testing.expectEqual(@as(usize, 3), nextBatchEnd(&paths, 2, 12));
+
+    // A budget too small for even one path must still consume one, or the
+    // caller loops forever and the remaining paths are never removed.
+    try std.testing.expectEqual(@as(usize, 1), nextBatchEnd(&paths, 0, 1));
+
+    // Walking the whole list covers every path exactly once.
+    var start: usize = 0;
+    var seen: usize = 0;
+    while (start < paths.len) {
+        const end = nextBatchEnd(&paths, start, 7);
+        try std.testing.expect(end > start);
+        seen += end - start;
+        start = end;
+    }
+    try std.testing.expectEqual(paths.len, seen);
 }
 
 test "deeperPathFirst sorts children before their parents" {
