@@ -61,7 +61,7 @@ Anything not implemented natively falls back to the real `brew` binary.
 | **Dependencies** | ~30 Rust crates, SQLite, Tokio | Zero — Zig stdlib only |
 | **Binary size** | 7.9 MB | Single static binary, significantly smaller |
 | **Migration** | Required (`zb migrate`) | Not needed — works on existing Homebrew installation |
-| **Casks** | Not supported | `.app` casks (binary-and-app artifacts) work; brew falls back for `.pkg`/font casks |
+| **Casks** | Not supported | `.app`, binary, and `.pkg` casks work — `.pkg` installs via `installer` and uninstalls via `pkgutil`/`delete`/`trash`/`rmdir`. A pkg cask whose `uninstall` needs steps bru lacks (`launchctl`, `quit`, `script`, `kext`) defers to brew rather than install something it can't cleanly remove |
 | **Correctness** | Skips patching ffmpeg's `libav*.pc` pkg-config files — `@@HOMEBREW_PREFIX@@` placeholders leak through (see Benchmark below) | Full pkg-config patching alongside Mach-O relocation |
 
 ### vs nanobrew

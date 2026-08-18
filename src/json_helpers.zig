@@ -25,6 +25,38 @@ pub fn writeJsonStr(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// Parse a JSON array of strings into an owned slice; empty when the key is
+/// absent or not an array. Non-string elements are skipped.
+pub fn parseStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![][]const u8 {
+    const arr_val = obj.get(key) orelse return try allocator.alloc([]const u8, 0);
+    const arr = switch (arr_val) {
+        .array => |a| a,
+        else => return try allocator.alloc([]const u8, 0),
+    };
+
+    var result = try std.ArrayList([]const u8).initCapacity(allocator, arr.items.len);
+    errdefer {
+        for (result.items) |s| allocator.free(s);
+        result.deinit(allocator);
+    }
+
+    for (arr.items) |item| {
+        const s = switch (item) {
+            .string => |v| v,
+            else => continue,
+        };
+        result.appendAssumeCapacity(try allocator.dupe(u8, s));
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
+/// Free a slice of owned strings.
+pub fn freeStringSlice(allocator: std.mem.Allocator, slice: []const []const u8) void {
+    for (slice) |s| allocator.free(s);
+    allocator.free(slice);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

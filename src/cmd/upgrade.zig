@@ -753,9 +753,20 @@ fn runCaskUpgrade(
         };
         defer cask_mod.freeResolvedCask(allocator, resolved);
 
-        if (resolved.binaries.len == 0 and resolved.apps.len == 0) {
-            err_out.warn("Skipping cask \"{s}\": no binaries or app bundle.", .{item.token});
-            continue;
+        switch (cask_mod.installability(resolved)) {
+            .ok => {},
+            .no_artifacts => {
+                err_out.warn("Skipping cask \"{s}\": no binaries, app bundle, or package.", .{item.token});
+                continue;
+            },
+            // Without this, upgrade would be a way around the install gate:
+            // brew installs these, and bru scans the Caskroom regardless of
+            // who filled it.
+            .unremovable => {
+                err_out.warn("Skipping cask \"{s}\": uninstall needs steps bru doesn't support.", .{item.token});
+                err_out.print("Use: brew upgrade --cask {s}\n", .{item.token});
+                continue;
+            },
         }
 
         cask_install.installCask(allocator, config, &http_client, resolved, item.installed_version) catch |install_err| {
