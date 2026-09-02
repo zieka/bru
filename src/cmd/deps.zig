@@ -59,9 +59,8 @@ pub fn depsCmd(allocator: Allocator, args: []const []const u8, config: Config) a
     }
 
     var idx = try Index.loadOrBuild(allocator, config.cache);
-    // Note: do not call idx.deinit() -- the index may be mmap'd (from disk)
-    // in which case the allocator field is undefined. The process exits after
-    // this command so OS reclamation is sufficient.
+    // Note: do not call idx.deinit() -- one command per process, so OS
+    // reclamation handles it (see the allocator choice in main.zig).
 
     const entry = idx.lookup(formula_name.?) orelse {
         const err_out = Output.initErr(config.no_color);

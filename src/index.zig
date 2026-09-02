@@ -111,7 +111,9 @@ const StringTableBuilder = struct {
 
 pub const Index = struct {
     data: []const u8,
-    allocator: Allocator,
+    /// null when `data` is mmap'd: Allocator.free() memsets the buffer before
+    /// releasing it, which faults on the read-only mapping.
+    allocator: ?Allocator,
 
     /// Build a binary index from a slice of FormulaInfo.
     pub fn build(allocator: Allocator, formulae: []const FormulaInfo) !Index {
@@ -263,9 +265,15 @@ pub const Index = struct {
         };
     }
 
-    /// Free the index buffer.
+    /// Release the index buffer, matching how it was obtained.
     pub fn deinit(self: *Index) void {
-        self.allocator.free(self.data);
+        if (self.data.len == 0) return;
+        if (self.allocator) |a| {
+            a.free(self.data);
+        } else {
+            const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(self.data);
+            posix.munmap(aligned);
+        }
         self.data = &.{};
     }
 
@@ -381,12 +389,6 @@ pub const Index = struct {
     // Persistence
     // ------------------------------------------------------------------
 
-    /// Release an mmap'd index (from openFromDisk). Does not use the allocator.
-    fn munmapIndex(idx: Index) void {
-        const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(idx.data);
-        posix.munmap(aligned);
-    }
-
     /// Write the index data to a file, creating or overwriting.
     pub fn writeToDisk(self: *const Index, path: []const u8) !void {
         const file = try std.fs.createFileAbsolute(path, .{});
@@ -396,7 +398,7 @@ pub const Index = struct {
 
     /// Open a previously-written index from disk via mmap.
     /// Returns null if the file does not exist or is too small to contain a header.
-    /// The returned Index has mmap'd data; call munmapAndDeinit() to release it.
+    /// The returned index is mmap'd; deinit() unmaps it.
     pub fn openFromDisk(path: []const u8) !?Index {
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
             if (err == error.FileNotFound) return null;
@@ -434,7 +436,7 @@ pub const Index = struct {
 
         return Index{
             .data = data,
-            .allocator = undefined, // mmap'd; caller should not use allocator
+            .allocator = null, // mmap'd
         };
     }
 
@@ -450,7 +452,8 @@ pub const Index = struct {
         const jws_path = std.fmt.bufPrint(&jws_path_buf, "{s}/api/formula.jws.json", .{cache_dir}) catch
             return error.PathTooLong;
 
-        if (try openFromDisk(idx_path)) |idx| {
+        var loaded = try openFromDisk(idx_path);
+        if (loaded) |*idx| {
             // Check if the JWS source is newer than the cached index.
             const stale = blk: {
                 const idx_file = std.fs.openFileAbsolute(idx_path, .{}) catch break :blk true;
@@ -461,9 +464,9 @@ pub const Index = struct {
                 const jws_stat = jws_file.stat() catch break :blk false;
                 break :blk jws_stat.mtime > idx_stat.mtime;
             };
-            if (!stale) return idx;
+            if (!stale) return idx.*;
             // Stale: unmap and rebuild below.
-            munmapIndex(idx);
+            idx.deinit();
         }
 
         // 2. Read the JWS file.
@@ -627,14 +630,28 @@ test "lookup missing returns null" {
 test "loadOrBuild rebuilds stale index when JWS is newer" {
     const allocator = std.testing.allocator;
 
-    const home = std.posix.getenv("HOME") orelse return;
-    var cache_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/Library/Caches/Homebrew", .{home}) catch return;
+    // Hermetic: Homebrew no longer writes formula.jws.json, and a test must not
+    // clobber the user's real index.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("api");
 
-    var idx_buf: [1024]u8 = undefined;
-    const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/formula.bru.idx", .{cache_dir}) catch return;
+    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try tmp.dir.realpath(".", &cache_buf);
 
-    // Write a minimal valid .idx file with 0 entries and backdate it.
+    var idx_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const idx_path = try std.fmt.bufPrint(&idx_buf, "{s}/api/formula.bru.idx", .{cache_dir});
+
+    {
+        const jws =
+            \\{"payload":"[{\"name\":\"bat\",\"full_name\":\"bat\",\"desc\":\"Clone of cat(1)\",\"versions\":{\"stable\":\"0.26.1\"}},{\"name\":\"jq\",\"full_name\":\"jq\",\"desc\":\"JSON processor\",\"versions\":{\"stable\":\"1.7.1\"}}]"}
+        ;
+        const f = try tmp.dir.createFile("api/formula.jws.json", .{});
+        defer f.close();
+        try f.writeAll(jws);
+    }
+
+    // A valid but empty index, backdated so the JWS is newer.
     {
         const fake_header = IndexHeader{
             .entry_count = 0,
@@ -642,31 +659,58 @@ test "loadOrBuild rebuilds stale index when JWS is newer" {
             .entries_offset = @sizeOf(IndexHeader),
             .strings_offset = @sizeOf(IndexHeader),
         };
-        const f = std.fs.createFileAbsolute(idx_path, .{}) catch return;
-        f.writeAll(mem.asBytes(&fake_header)) catch {
-            f.close();
-            return;
-        };
-        // Backdate the file so the JWS is newer.
+        const f = try tmp.dir.createFile("api/formula.bru.idx", .{});
+        defer f.close();
+        try f.writeAll(mem.asBytes(&fake_header));
         const epoch_past: posix.timespec = .{ .sec = 1000000000, .nsec = 0 };
-        posix.futimens(f.handle, &.{ epoch_past, epoch_past }) catch {
-            f.close();
-            return;
-        };
-        f.close();
+        try posix.futimens(f.handle, &.{ epoch_past, epoch_past });
     }
 
-    // loadOrBuild should detect the stale index and rebuild from JWS.
-    var idx = Index.loadOrBuild(allocator, cache_dir) catch return;
+    // The index on disk is loadable and empty, so entry counts below can only
+    // come from a rebuild.
+    {
+        var stale = (try Index.openFromDisk(idx_path)).?;
+        defer stale.deinit();
+        try std.testing.expectEqual(@as(u32, 0), stale.entryCount());
+    }
+
+    var idx = try Index.loadOrBuild(allocator, cache_dir);
     defer idx.deinit();
 
-    // A rebuilt index from the real JWS should have thousands of entries.
-    // A stale load of our fake file would have 0 entries.
-    try std.testing.expect(idx.entryCount() > 5000);
-
-    // Verify the index is functional.
+    try std.testing.expectEqual(@as(u32, 2), idx.entryCount());
     const entry = idx.lookup("bat") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("bat", idx.getString(entry.name_offset));
+}
+
+test "loadOrBuild keeps the on-disk index when the JWS is missing" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("api");
+
+    var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try tmp.dir.realpath(".", &cache_buf);
+
+    const fake_header = IndexHeader{
+        .entry_count = 0,
+        .hash_table_offset = @sizeOf(IndexHeader),
+        .entries_offset = @sizeOf(IndexHeader),
+        .strings_offset = @sizeOf(IndexHeader),
+    };
+    {
+        const f = try tmp.dir.createFile("api/formula.bru.idx", .{});
+        defer f.close();
+        try f.writeAll(mem.asBytes(&fake_header));
+    }
+
+    // With no JWS to rebuild from, loadOrBuild hands back the mmap'd index.
+    // deinit() must unmap it rather than free it through the allocator.
+    var idx = try Index.loadOrBuild(allocator, cache_dir);
+    defer idx.deinit();
+
+    try std.testing.expect(idx.allocator == null);
+    try std.testing.expectEqual(@as(u32, 0), idx.entryCount());
 }
 
 test "loadOrBuild from real cache" {
@@ -676,12 +720,23 @@ test "loadOrBuild from real cache" {
     var buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&buf, "{s}/Library/Caches/Homebrew", .{home}) catch return;
 
-    // Delete any existing .idx file so we exercise the full build path.
-    var idx_buf: [1024]u8 = undefined;
-    const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/formula.bru.idx", .{cache_dir}) catch return;
-    std.fs.deleteFileAbsolute(idx_path) catch {};
+    var jws_buf: [1024]u8 = undefined;
+    const jws_path = std.fmt.bufPrint(&jws_buf, "{s}/api/formula.jws.json", .{cache_dir}) catch return;
+    std.fs.accessAbsolute(jws_path, .{}) catch return; // no source to build from
 
-    var idx = Index.loadOrBuild(allocator, cache_dir) catch return;
+    // Point a temp cache at the real JWS rather than rebuilding in place: this
+    // used to delete the user's index, which is unrecoverable without `bru update`.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("api");
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_cache = try tmp.dir.realpath(".", &tmp_buf);
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/api/formula.jws.json", .{tmp_cache});
+    try std.fs.symLinkAbsolute(jws_path, link_path, .{});
+
+    var idx = Index.loadOrBuild(allocator, tmp_cache) catch return;
     defer idx.deinit();
 
     // Should have >5000 entries.

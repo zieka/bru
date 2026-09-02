@@ -86,7 +86,9 @@ const StringTableBuilder = struct {
 
 pub const CaskIndex = struct {
     data: []const u8,
-    allocator: Allocator,
+    /// null when `data` is mmap'd: Allocator.free() memsets the buffer before
+    /// releasing it, which faults on the read-only mapping.
+    allocator: ?Allocator,
 
     /// Build a binary index from a slice of CaskInfo.
     pub fn build(allocator: Allocator, casks: []const CaskInfo) !CaskIndex {
@@ -188,9 +190,15 @@ pub const CaskIndex = struct {
         };
     }
 
-    /// Free the index buffer.
+    /// Release the index buffer, matching how it was obtained.
     pub fn deinit(self: *CaskIndex) void {
-        self.allocator.free(self.data);
+        if (self.data.len == 0) return;
+        if (self.allocator) |a| {
+            a.free(self.data);
+        } else {
+            const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(self.data);
+            posix.munmap(aligned);
+        }
         self.data = &.{};
     }
 
@@ -265,8 +273,7 @@ pub const CaskIndex = struct {
 
     /// Open a previously-written index from disk via mmap.
     /// Returns null if the file does not exist or is too small to contain a header.
-    /// The returned CaskIndex has mmap'd data; the process exits after use so OS
-    /// reclamation is sufficient.
+    /// The returned index is mmap'd; deinit() unmaps it.
     pub fn openFromDisk(path: []const u8) !?CaskIndex {
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
             if (err == error.FileNotFound) return null;
@@ -297,14 +304,8 @@ pub const CaskIndex = struct {
 
         return CaskIndex{
             .data = data,
-            .allocator = undefined, // mmap'd; caller should not use allocator
+            .allocator = null, // mmap'd
         };
-    }
-
-    /// Release an mmap'd cask index. Does not use the allocator.
-    fn munmapCaskIndex(idx: CaskIndex) void {
-        const aligned: []align(std.heap.page_size_min) const u8 = @alignCast(idx.data);
-        posix.munmap(aligned);
     }
 
     /// Load an existing index from disk, or build one from the JWS cache.
@@ -319,7 +320,8 @@ pub const CaskIndex = struct {
         const jws_path = std.fmt.bufPrint(&jws_path_buf, "{s}/api/cask.jws.json", .{cache_dir}) catch
             return error.PathTooLong;
 
-        if (try openFromDisk(idx_path)) |idx| {
+        var loaded = try openFromDisk(idx_path);
+        if (loaded) |*idx| {
             // Check if the JWS source is newer than the cached index.
             const stale = blk: {
                 const idx_file = std.fs.openFileAbsolute(idx_path, .{}) catch break :blk true;
@@ -330,9 +332,9 @@ pub const CaskIndex = struct {
                 const jws_stat = jws_file.stat() catch break :blk false;
                 break :blk jws_stat.mtime > idx_stat.mtime;
             };
-            if (!stale) return idx;
+            if (!stale) return idx.*;
             // Stale: unmap and rebuild below.
-            munmapCaskIndex(idx);
+            idx.deinit();
         }
 
         // 2. Read the JWS file.
@@ -452,12 +454,23 @@ test "loadOrBuild from real cache" {
     var buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&buf, "{s}/Library/Caches/Homebrew", .{home}) catch return;
 
-    // Delete any existing .idx file so we exercise the full build path.
-    var idx_buf: [1024]u8 = undefined;
-    const idx_path = std.fmt.bufPrint(&idx_buf, "{s}/api/cask.bru.idx", .{cache_dir}) catch return;
-    std.fs.deleteFileAbsolute(idx_path) catch {};
+    var jws_buf: [1024]u8 = undefined;
+    const jws_path = std.fmt.bufPrint(&jws_buf, "{s}/api/cask.jws.json", .{cache_dir}) catch return;
+    std.fs.accessAbsolute(jws_path, .{}) catch return; // no source to build from
 
-    var idx = CaskIndex.loadOrBuild(allocator, cache_dir) catch return;
+    // Point a temp cache at the real JWS rather than rebuilding in place: this
+    // used to delete the user's index, which is unrecoverable without `bru update`.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("api");
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_cache = try tmp.dir.realpath(".", &tmp_buf);
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/api/cask.jws.json", .{tmp_cache});
+    try std.fs.symLinkAbsolute(jws_path, link_path, .{});
+
+    var idx = CaskIndex.loadOrBuild(allocator, tmp_cache) catch return;
     defer idx.deinit();
 
     // Should have >1000 cask entries.

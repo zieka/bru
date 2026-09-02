@@ -295,9 +295,8 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
 
     // Load formula index (always needed for routing named args).
     var index = try Index.loadOrBuild(allocator, config.cache);
-    // Note: do not call index.deinit() -- the index may be mmap'd (from disk)
-    // in which case the allocator field is undefined. The process exits after
-    // this command so OS reclamation is sufficient.
+    // Note: do not call index.deinit() -- one command per process, so OS
+    // reclamation handles it (see the allocator choice in main.zig).
     _ = &index;
 
     const cellar = Cellar.init(config.cellar);

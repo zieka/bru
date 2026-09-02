@@ -44,8 +44,8 @@ pub fn migrateCmd(allocator: Allocator, args: []const []const u8, config: Config
     const cellar = Cellar.init(config.cellar);
 
     // Load the formula index.
-    // Note: do not call idx.deinit() -- the index may be mmap'd (from disk)
-    // and the arena allocator handles cleanup on process exit.
+    // Note: do not call idx.deinit() -- one command per process, so the arena
+    // and OS reclamation handle it (see the allocator choice in main.zig).
     var idx = Index.loadOrBuild(allocator, config.cache) catch {
         err_out.err("Could not load formula index.", .{});
         std.process.exit(1);
