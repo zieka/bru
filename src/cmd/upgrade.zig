@@ -343,10 +343,6 @@ pub fn upgradeCmd(allocator: Allocator, args: []const []const u8, config: Config
                 false; // not installed anywhere; fall through to formula error path
 
             if (route_cask) {
-                if (!is_in_caskroom) {
-                    err_out.err("{s} is not installed.", .{name});
-                    continue;
-                }
                 try collectNamedCaskUpgrade(allocator, config, name, &casks_to_upgrade, out, err_out);
             } else {
                 try collectNamedFormulaUpgrade(allocator, config, &index, cellar, name, &to_upgrade, out, err_out);
@@ -653,19 +649,23 @@ fn collectNamedCaskUpgrade(
         return;
     };
 
-    const entry = cask_idx.lookup(name) orelse {
+    const entry = cask_idx.resolve(name) orelse {
         err_out.err("No available cask with the name \"{s}\".", .{name});
         return;
     };
+    const token = cask_idx.getString(entry.token_offset);
+    if (!std.mem.eql(u8, token, name)) {
+        err_out.warn("Cask {s} was renamed to {s}.", .{ name, token });
+    }
 
     if ((entry.flags & 2) != 0) {
-        err_out.err("Cask \"{s}\" is disabled.", .{name});
+        err_out.err("Cask \"{s}\" is disabled.", .{token});
         return;
     }
 
     const caskroom = Cellar.init(config.caskroom);
-    const installed_versions = caskroom.installedVersions(allocator, name) orelse {
-        err_out.err("{s} is not installed.", .{name});
+    const installed_versions = caskroom.installedVersions(allocator, token) orelse {
+        err_out.err("{s} is not installed.", .{token});
         return;
     };
     defer {
@@ -676,18 +676,18 @@ fn collectNamedCaskUpgrade(
     const installed_latest = installed_versions[installed_versions.len - 1];
     const latest = cask_idx.getString(entry.version_offset);
     if (latest.len == 0) {
-        err_out.err("Cask \"{s}\" has no version in the index.", .{name});
+        err_out.err("Cask \"{s}\" has no version in the index.", .{token});
         return;
     }
 
     if (!std.mem.eql(u8, installed_latest, latest)) {
         try to_upgrade.append(allocator, .{
-            .token = try allocator.dupe(u8, name),
+            .token = try allocator.dupe(u8, token),
             .installed_version = try allocator.dupe(u8, installed_latest),
             .latest_version = try allocator.dupe(u8, latest),
         });
     } else {
-        out.print("{s} {s} already up-to-date.\n", .{ name, installed_latest });
+        out.print("{s} {s} already up-to-date.\n", .{ token, installed_latest });
     }
 }
 
@@ -873,4 +873,74 @@ test "parseUpgradeArgs --formulae alias" {
     var parsed = parseUpgradeArgs(std.testing.allocator, args);
     defer parsed.pkg_names.deinit(std.testing.allocator);
     try std.testing.expect(parsed.only_formulae);
+}
+
+test "collectNamedCaskUpgrade queues a renamed cask under its current token" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const old_tokens = [_][]const u8{"tailscale"};
+    const casks = [_]cask_mod.CaskInfo{.{
+        .token = "tailscale-app",
+        .full_token = "tailscale-app",
+        .name = "Tailscale",
+        .desc = "",
+        .homepage = "",
+        .version = "2.0",
+        .url = "",
+        .sha256 = "",
+        .deprecated = false,
+        .disabled = false,
+        .old_tokens = &old_tokens,
+    }};
+    var idx = try CaskIndex.build(allocator, &casks);
+    defer idx.deinit();
+
+    try tmp.dir.makePath("api");
+    try tmp.dir.makePath("Caskroom/tailscale-app/1.0");
+    const idx_path = try std.fs.path.join(allocator, &.{ root, "api", "cask.bru.idx" });
+    defer allocator.free(idx_path);
+    try idx.writeToDisk(idx_path);
+    const caskroom = try std.fs.path.join(allocator, &.{ root, "Caskroom" });
+    defer allocator.free(caskroom);
+
+    const config = Config{
+        .prefix = "/nonexistent/__bru_test_prefix__",
+        .cellar = "/nonexistent/__bru_test_cellar__",
+        .caskroom = caskroom,
+        .repository = "/nonexistent/__bru_test_repo__",
+        .cache = root,
+        .brew_file = null,
+        .no_color = true,
+        .no_emoji = false,
+        .verbose = false,
+        .debug = false,
+        .quiet = false,
+        .timing = false,
+        .no_post_install = false,
+        .ruby_path = "/usr/bin/ruby",
+        .allocator = allocator,
+    };
+
+    const sink = try tmp.dir.createFile("sink", .{});
+    defer sink.close();
+    const out = Output{ .file = sink, .use_color = false };
+
+    var queued: std.ArrayList(OutdatedCask) = .{};
+    defer {
+        for (queued.items) |item| {
+            allocator.free(item.token);
+            allocator.free(item.installed_version);
+            allocator.free(item.latest_version);
+        }
+        queued.deinit(allocator);
+    }
+
+    try collectNamedCaskUpgrade(allocator, config, "tailscale", &queued, out, out);
+
+    try std.testing.expectEqual(@as(usize, 1), queued.items.len);
+    try std.testing.expectEqualStrings("tailscale-app", queued.items[0].token);
 }

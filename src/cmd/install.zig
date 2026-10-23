@@ -367,30 +367,34 @@ fn installOne(allocator: Allocator, name: []const u8, is_cask: bool, args: []con
 fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: Output, err_out: Output) anyerror!void {
     // Quick existence check using the cask index.
     var cask_idx = try CaskIndex.loadOrBuild(allocator, config.cache);
-    const cask_entry = cask_idx.lookup(name) orelse {
+    const cask_entry = cask_idx.resolve(name) orelse {
         err_out.err("No available cask with the name \"{s}\".", .{name});
         err_out.print("Searched: {s}/api/cask.jws.json\n", .{config.cache});
         std.process.exit(1);
     };
+    const token = cask_idx.getString(cask_entry.token_offset);
+    if (!std.mem.eql(u8, token, name)) {
+        err_out.warn("Cask {s} was renamed to {s}.", .{ name, token });
+    }
 
     // Check deprecated/disabled status.
     const cask_disabled = (cask_entry.flags & 2) != 0;
     const cask_deprecated = (cask_entry.flags & 1) != 0;
     if (cask_disabled) {
-        err_out.err("Cask \"{s}\" is disabled.", .{name});
+        err_out.err("Cask \"{s}\" is disabled.", .{token});
         std.process.exit(1);
     }
     if (cask_deprecated) {
-        out.warn("Cask \"{s}\" is deprecated.", .{name});
+        out.warn("Cask \"{s}\" is deprecated.", .{token});
     }
 
     // Fetch full per-cask metadata from API.
     var http_client = HttpClient.init(allocator);
     defer http_client.deinit();
 
-    out.print("Fetching cask metadata for {s}...\n", .{name});
-    const resolved = cask_mod.fetchAndResolveCask(allocator, &http_client, name) catch |fetch_err| {
-        err_out.err("Failed to fetch cask metadata for \"{s}\": {s}", .{ name, @errorName(fetch_err) });
+    out.print("Fetching cask metadata for {s}...\n", .{token});
+    const resolved = cask_mod.fetchAndResolveCask(allocator, &http_client, token) catch |fetch_err| {
+        err_out.err("Failed to fetch cask metadata for \"{s}\": {s}", .{ token, @errorName(fetch_err) });
         return fetch_err;
     };
     defer cask_mod.freeResolvedCask(allocator, resolved);
@@ -398,9 +402,9 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
     switch (cask_mod.installability(resolved)) {
         .ok => {},
         .no_artifacts => {
-            err_out.warn("No installable artifacts for cask \"{s}\".", .{name});
+            err_out.warn("No installable artifacts for cask \"{s}\".", .{token});
             err_out.print("This cask uses an artifact type bru can't handle yet (e.g. font, installer).\n", .{});
-            err_out.print("Use: brew install --cask {s}\n", .{name});
+            err_out.print("Use: brew install --cask {s}\n", .{token});
             return;
         },
         // The `uninstall` stanza is the only description of how to take a
@@ -411,16 +415,16 @@ fn installCaskCmd(allocator: Allocator, name: []const u8, config: Config, out: O
             const directives = std.mem.join(allocator, ", ", resolved.uninstall.unsupported) catch "";
             err_out.warn(
                 "Cask \"{s}\" needs uninstall steps bru doesn't support yet: {s}.",
-                .{ name, directives },
+                .{ token, directives },
             );
             err_out.print("Deferring to brew so it stays uninstallable.\n", .{});
-            fallback.execBrew(allocator, &.{ "bru", "install", "--cask", name });
+            fallback.execBrew(allocator, &.{ "bru", "install", "--cask", token });
         },
     }
 
     // Run the cask install pipeline.
     cask_install.installCask(allocator, config, &http_client, resolved, null) catch |install_err| {
-        err_out.err("Failed to install cask \"{s}\" ({s}): {s}", .{ name, resolved.url, @errorName(install_err) });
+        err_out.err("Failed to install cask \"{s}\" ({s}): {s}", .{ token, resolved.url, @errorName(install_err) });
         return install_err;
     };
 }

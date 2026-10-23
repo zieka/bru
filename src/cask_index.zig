@@ -11,13 +11,14 @@ const CaskInfo = cask_mod.CaskInfo;
 
 pub const CaskIndexHeader = extern struct {
     magic: [4]u8 = .{ 'B', 'R', 'U', 'C' },
-    version: u32 = 1,
+    version: u32 = 2,
     source_hash: [32]u8 = .{0} ** 32,
     entry_count: u32 = 0,
     _pad: [4]u8 = .{0} ** 4,
     hash_table_offset: u64 = 0,
     entries_offset: u64 = 0,
     strings_offset: u64 = 0,
+    old_token_hash_table_offset: u64 = 0,
 };
 
 pub const CaskIndexEntry = extern struct {
@@ -49,6 +50,14 @@ fn fnvHash(s: []const u8) u32 {
         h *%= 16777619;
     }
     return h;
+}
+
+fn insertBucket(table: []HashBucket, key: []const u8, bucket: HashBucket) void {
+    var slot = fnvHash(key) % table.len;
+    while (table[slot].entry_index != std.math.maxInt(u32)) {
+        slot = (slot + 1) % table.len;
+    }
+    table[slot] = bucket;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,21 +136,36 @@ pub const CaskIndex = struct {
         defer allocator.free(hash_table);
 
         // Initialise all buckets as empty.
-        for (hash_table) |*b| {
-            b.* = HashBucket{};
-        }
+        @memset(hash_table, .{});
 
         // Insert each cask token.
         for (casks, 0..) |c, i| {
-            const h = fnvHash(c.token);
-            var slot = h % bucket_count;
-            while (hash_table[slot].entry_index != std.math.maxInt(u32)) {
-                slot = (slot + 1) % bucket_count;
-            }
-            hash_table[slot] = HashBucket{
+            insertBucket(hash_table, c.token, .{
                 .string_offset = entries[i].token_offset,
                 .entry_index = @intCast(i),
-            };
+            });
+        }
+
+        // ------------------------------------------------------------------
+        // 2b. Build old-token hash table (old_token -> entry_index).
+        // ------------------------------------------------------------------
+        var total_old_tokens: u32 = 0;
+        for (casks) |c| {
+            total_old_tokens += @intCast(c.old_tokens.len);
+        }
+
+        const old_bucket_count: u32 = if (total_old_tokens == 0) 2 else total_old_tokens * 2;
+        const old_hash_table = try allocator.alloc(HashBucket, old_bucket_count);
+        defer allocator.free(old_hash_table);
+        @memset(old_hash_table, .{});
+
+        for (casks, 0..) |c, i| {
+            for (c.old_tokens) |old_token| {
+                insertBucket(old_hash_table, old_token, .{
+                    .string_offset = try stb.addString(allocator, old_token),
+                    .entry_index = @intCast(i),
+                });
+            }
         }
 
         // ------------------------------------------------------------------
@@ -152,10 +176,13 @@ pub const CaskIndex = struct {
         const entries_size: u64 = @as(u64, @intCast(casks.len)) * @sizeOf(CaskIndexEntry);
         const strings_size: u64 = stb.data.items.len;
 
+        const old_hash_table_size: u64 = @as(u64, old_bucket_count) * @sizeOf(HashBucket);
+
         const hash_table_offset = header_size;
         const entries_offset = hash_table_offset + hash_table_size;
         const strings_offset = entries_offset + entries_size;
-        const total_size: usize = @intCast(strings_offset + strings_size);
+        const old_token_ht_offset = strings_offset + strings_size;
+        const total_size: usize = @intCast(old_token_ht_offset + old_hash_table_size);
 
         // ------------------------------------------------------------------
         // 4. Allocate buffer and copy everything in.
@@ -169,6 +196,7 @@ pub const CaskIndex = struct {
             .hash_table_offset = hash_table_offset,
             .entries_offset = entries_offset,
             .strings_offset = strings_offset,
+            .old_token_hash_table_offset = old_token_ht_offset,
         };
         const header_bytes = mem.asBytes(&header);
         @memcpy(buf[0..header_bytes.len], header_bytes);
@@ -183,6 +211,10 @@ pub const CaskIndex = struct {
 
         // String table
         @memcpy(buf[@intCast(strings_offset)..][0..stb.data.items.len], stb.data.items);
+
+        // Old-token hash table
+        const oht_bytes = mem.sliceAsBytes(old_hash_table);
+        @memcpy(buf[@intCast(old_token_ht_offset)..][0..oht_bytes.len], oht_bytes);
 
         return CaskIndex{
             .data = buf,
@@ -241,19 +273,29 @@ pub const CaskIndex = struct {
     pub fn lookup(self: *const CaskIndex, token: []const u8) ?CaskIndexEntry {
         const header = self.getHeader();
         if (header.entry_count == 0) return null;
-        const bucket_count: u32 = header.entry_count * 2;
-        const h = fnvHash(token);
-        var slot = h % bucket_count;
+        return self.probe(header.hash_table_offset, header.entry_count * 2, token);
+    }
 
+    /// Like `lookup`, but also matches old tokens of renamed casks.
+    /// The entry's token may differ from `name`; use it for API URLs and Caskroom paths.
+    pub fn resolve(self: *const CaskIndex, name: []const u8) ?CaskIndexEntry {
+        if (self.lookup(name)) |entry| return entry;
+        const offset = self.getHeader().old_token_hash_table_offset;
+        // WARNING: bucket count comes from data.len; keep this table last in the file.
+        const bucket_count: u32 = @intCast((self.data.len - @as(usize, @intCast(offset))) / @sizeOf(HashBucket));
+        return self.probe(offset, bucket_count, name);
+    }
+
+    fn probe(self: *const CaskIndex, table_offset: u64, bucket_count: u32, key: []const u8) ?CaskIndexEntry {
+        var slot = fnvHash(key) % bucket_count;
         while (true) {
-            const bucket_off: usize = @intCast(header.hash_table_offset + @as(u64, slot) * @sizeOf(HashBucket));
+            const bucket_off: usize = @intCast(table_offset + @as(u64, slot) * @sizeOf(HashBucket));
             const bucket = mem.bytesToValue(HashBucket, self.data[bucket_off..][0..@sizeOf(HashBucket)]);
             if (bucket.entry_index == std.math.maxInt(u32)) {
                 return null; // empty bucket -- not found
             }
-            // Compare the token string at that offset.
             const candidate = self.getString(bucket.string_offset);
-            if (mem.eql(u8, candidate, token)) {
+            if (mem.eql(u8, candidate, key)) {
                 return self.getEntryByIndex(bucket.entry_index);
             }
             slot = (slot + 1) % bucket_count;
@@ -298,6 +340,13 @@ pub const CaskIndex = struct {
 
         // Verify magic bytes.
         if (!mem.eql(u8, data[0..4], "BRUC")) {
+            posix.munmap(mapped);
+            return null;
+        }
+
+        // Older layouts lack the old-token table; null forces a rebuild.
+        const ver = mem.readInt(u32, data[4..8], .little);
+        if (ver != (CaskIndexHeader{}).version) {
             posix.munmap(mapped);
             return null;
         }
@@ -389,6 +438,7 @@ test "build and lookup" {
         .sha256 = "abc123def456",
         .deprecated = false,
         .disabled = false,
+        .old_tokens = &.{},
     };
 
     const casks = [_]CaskInfo{cask};
@@ -434,6 +484,7 @@ test "lookup missing returns null" {
         .sha256 = "",
         .deprecated = false,
         .disabled = false,
+        .old_tokens = &.{},
     };
 
     const casks = [_]CaskInfo{cask};
@@ -445,6 +496,32 @@ test "lookup missing returns null" {
     try std.testing.expect(idx.lookup("nonexistent") == null);
     try std.testing.expect(idx.lookup("") == null);
     try std.testing.expect(idx.lookup("firefoxes") == null);
+}
+
+test "resolve finds a renamed cask by its old token" {
+    const allocator = std.testing.allocator;
+
+    const old = [_][]const u8{"tailscale"};
+    const renamed = CaskInfo{
+        .token = "tailscale-app",
+        .full_token = "tailscale-app",
+        .name = "Tailscale",
+        .desc = "Mesh VPN based on WireGuard",
+        .homepage = "",
+        .version = "1.104.1",
+        .url = "",
+        .sha256 = "",
+        .deprecated = false,
+        .disabled = false,
+        .old_tokens = &old,
+    };
+
+    var idx = try CaskIndex.build(allocator, &.{renamed});
+    defer idx.deinit();
+
+    const by_old = idx.resolve("tailscale") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("tailscale-app", idx.getString(by_old.token_offset));
+    try std.testing.expect(idx.resolve("nonexistent") == null);
 }
 
 test "loadOrBuild from real cache" {
@@ -495,6 +572,7 @@ test "deprecated and disabled flags" {
         .sha256 = "",
         .deprecated = true,
         .disabled = true,
+        .old_tokens = &.{},
     };
 
     const casks = [_]CaskInfo{cask};
@@ -505,4 +583,29 @@ test "deprecated and disabled flags" {
     const entry = idx.lookup("old-app") orelse return error.TestUnexpectedResult;
     // bit 0: deprecated, bit 1: disabled -> flags = 3
     try std.testing.expectEqual(@as(u16, 3), entry.flags);
+}
+
+test "openFromDisk rejects an index written in an older format version" {
+    const allocator = std.testing.allocator;
+
+    var idx = try CaskIndex.build(allocator, &.{});
+    defer idx.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir_path);
+    const path = try std.fs.path.join(allocator, &.{ dir_path, "cask.bru.idx" });
+    defer allocator.free(path);
+
+    try idx.writeToDisk(path);
+    var current = (try CaskIndex.openFromDisk(path)) orelse return error.TestUnexpectedResult;
+    current.deinit();
+
+    const old = try allocator.dupe(u8, idx.data);
+    defer allocator.free(old);
+    mem.writeInt(u32, old[4..8], 1, .little);
+    try tmp.dir.writeFile(.{ .sub_path = "cask.bru.idx", .data = old });
+
+    try std.testing.expect((try CaskIndex.openFromDisk(path)) == null);
 }
