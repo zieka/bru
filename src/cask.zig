@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const HttpClient = @import("http.zig").HttpClient;
+const json_helpers = @import("json_helpers.zig");
 
 /// Parsed representation of a single Homebrew cask from the API JSON.
 pub const CaskInfo = struct {
@@ -16,6 +17,7 @@ pub const CaskInfo = struct {
     sha256: []const u8,
     deprecated: bool,
     disabled: bool,
+    old_tokens: []const []const u8,
 };
 
 /// Parse a JSON array of cask objects into a slice of CaskInfo.
@@ -84,6 +86,9 @@ fn parseOneCask(allocator: Allocator, obj: std.json.ObjectMap, variation_tag: []
     const full_token = try allocator.dupe(u8, jsonStr(obj, "full_token") orelse "");
     errdefer allocator.free(full_token);
 
+    const old_tokens = try json_helpers.parseStringArray(allocator, obj, "old_tokens");
+    errdefer json_helpers.freeStringSlice(allocator, old_tokens);
+
     // name is a JSON array -- take the first element
     const name = blk: {
         const name_val = obj.get("name") orelse break :blk try allocator.dupe(u8, "");
@@ -139,6 +144,7 @@ fn parseOneCask(allocator: Allocator, obj: std.json.ObjectMap, variation_tag: []
         .sha256 = sha256,
         .deprecated = deprecated,
         .disabled = disabled,
+        .old_tokens = old_tokens,
     };
 }
 
@@ -152,6 +158,7 @@ pub fn freeCask(allocator: Allocator, c: CaskInfo) void {
     allocator.free(c.version);
     allocator.free(c.url);
     allocator.free(c.sha256);
+    json_helpers.freeStringSlice(allocator, c.old_tokens);
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +807,7 @@ test "parseCaskJson parses small payload" {
         \\[{
         \\  "token": "firefox",
         \\  "full_token": "firefox",
-        \\  "old_tokens": [],
+        \\  "old_tokens": ["firefox-old"],
         \\  "tap": "homebrew/cask",
         \\  "name": ["Mozilla Firefox"],
         \\  "desc": "Web browser",
@@ -833,6 +840,8 @@ test "parseCaskJson parses small payload" {
     try std.testing.expectEqualStrings("abc123def456", firefox.sha256);
     try std.testing.expect(!firefox.deprecated);
     try std.testing.expect(!firefox.disabled);
+    try std.testing.expectEqual(@as(usize, 1), firefox.old_tokens.len);
+    try std.testing.expectEqualStrings("firefox-old", firefox.old_tokens[0]);
 }
 
 test "parseCaskJson handles name array with multiple elements" {
